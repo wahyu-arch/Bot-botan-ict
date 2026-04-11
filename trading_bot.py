@@ -523,9 +523,16 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
         Jalankan diskusi grup WhatsApp 3 ronde antara Arka, Nova, Zara.
         Returns: semua pesan + kesimpulan terstruktur.
         """
+        import api_server
+        from datetime import timezone
+
         logger.info("[GRUP DISKUSI] ========== Mulai diskusi 3 ronde ==========")
         if loss_context:
             logger.info(f"[GRUP DISKUSI] Mode: REITERASI LOSS")
+
+        # Buat session ID unik
+        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        api_server.start_session(session_id, signal, loss_context)
 
         all_messages = []
 
@@ -538,10 +545,20 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
                 market_context=market_context,
                 loss_context=loss_context,
             )
+            # Push tiap pesan ke API server secara realtime
+            for msg in new_msgs:
+                api_server.push_message(
+                    ai_id=msg.get("ai", "system"),
+                    nama=msg.get("nama", ""),
+                    pesan=msg.get("pesan", ""),
+                    ronde=ronde,
+                    session_id=session_id,
+                )
             all_messages.extend(new_msgs)
 
         logger.info("[GRUP DISKUSI] --- Menyusun kesimpulan ---")
         conclusion = self._extract_panel_conclusion(all_messages, signal, market_context)
+        api_server.finish_session(conclusion)
 
         logger.info(
             f"[GRUP DISKUSI] Selesai | consensus={conclusion.get('consensus')} | "
