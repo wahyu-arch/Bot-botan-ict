@@ -6,8 +6,10 @@ import asyncio
 import sys
 import os
 
-# Tambah path
-sys.path.insert(0, os.path.dirname(__file__))
+# Fix path agar src/ ditemukan di Railway (/app/main.py)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from src.trading_bot import ICTTradingBot
 
