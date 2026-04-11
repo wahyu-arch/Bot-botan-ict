@@ -1,0 +1,435 @@
+"""
+ICT Trading Bot dengan Groq AI + Memory Self-Iteration
+Strategi: M15 (market bias) + M1 (entry confirmation)
+"""
+
+import os
+import json
+import time
+import logging
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional
+from groq import Groq
+from .market_data import MarketDataFetcher
+from .ict_analyzer import ICTAnalyzer
+from .memory_system import MemorySystem
+from .risk_manager import RiskManager
+from .trade_executor import TradeExecutor
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/trading_bot.log"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+
+class ICTTradingBot:
+    """
+    Bot trading dengan strategi ICT:
+    - M15: menentukan arah bias market (struktur, OB, FVG)
+    - M1: konfirmasi entry (MSS, FVG fill, rejection)
+    - Groq AI: analisis + keputusan dengan memory self-iteration
+    """
+
+    def __init__(self):
+        self.groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        self.symbol = os.getenv("TRADING_SYMBOL", "XAUUSD")
+        self.paper_trading = os.getenv("PAPER_TRADING", "true").lower() == "true"
+        self.max_iterations = int(os.getenv("MAX_AI_ITERATIONS", "3"))
+        self.scan_interval = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
+
+        self.market_data = MarketDataFetcher(self.symbol)
+        self.ict_analyzer = ICTAnalyzer()
+        self.memory = MemorySystem()
+        self.risk_manager = RiskManager()
+        self.executor = TradeExecutor(paper_mode=self.paper_trading)
+
+        logger.info(
+            f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
+        )
+
+    def _build_system_prompt(self) -> str:
+        """Bangun system prompt ICT untuk Groq AI."""
+        recent_errors = self.memory.get_recent_errors(limit=5)
+        error_context = ""
+        if recent_errors:
+            error_context = "\n\nKESALAHAN SEBELUMNYA YANG HARUS DIHINDARI:\n"
+            for err in recent_errors:
+                error_context += f"- [{err['timestamp']}] {err['error']}: {err['lesson']}\n"
+
+        recent_wins = self.memory.get_recent_trades(result="win", limit=3)
+        win_patterns = ""
+        if recent_wins:
+            win_patterns = "\n\nPOLA WINNING TERBARU:\n"
+            for trade in recent_wins:
+                win_patterns += f"- {trade['setup']}: {trade['notes']}\n"
+
+        return f"""Kamu adalah analis trading profesional menggunakan metodologi ICT (Inner Circle Trader).
+
+FRAMEWORK ANALISIS:
+1. M15 (MARKET BIAS):
+   - Identifikasi struktur market: Higher High (HH), Higher Low (HL) = bullish
+   - Lower High (LH), Lower Low (LL) = bearish
+   - Cari Order Block (OB): last candle opposite sebelum impulse move
+   - Fair Value Gap (FVG): gap antara high candle 1 dan low candle 3
+   - Break of Structure (BOS): konfirmasi kelanjutan trend
+   - Change of Character (CHoCH): potensi reversal
+
+2. M1 (KONFIRMASI ENTRY):
+   - Market Structure Shift (MSS): BOS di M1 searah bias M15
+   - FVG fill: harga mengisi gap sebelum lanjut
+   - Rejection dari OB: pin bar / engulfing di OB M15
+   - Entry hanya saat ada konfluensi minimum 2 faktor
+
+3. MANAJEMEN RISIKO:
+   - SL selalu di balik OB (di luar struktur)
+   - TP minimal 2:1 RR, target ke liquidity pool berikutnya
+   - Jangan trading melawan bias M15
+   - Skip jika spread > 2 pip atau volatilitas sangat tinggi
+
+4. KONDISI NO TRADE:
+   - Berita besar dalam 30 menit
+   - Ranging market tanpa struktur jelas di M15
+   - OB sudah terlalu jauh dari harga saat ini (> 50 pip)
+   - Sudah 2 loss berturut-turut hari ini
+   - Funding rate sangat negatif/positif (>0.1%) melawan posisi
+
+5. BYBIT SPECIFIC:
+   - Symbol format: BTCUSDT, ETHUSDT, SOLUSDT (Linear Perpetual USDT)
+   - Qty dalam koin base (bukan USD)
+   - SL/TP menggunakan MarkPrice
+   - Risk 1% per trade adalah FIXED - jangan rekomendasikan qty lebih besar
+{error_context}{win_patterns}
+
+RESPONSE FORMAT (JSON ketat, tanpa teks lain):
+{{
+  "bias_m15": "bullish|bearish|neutral",
+  "bias_reason": "penjelasan singkat struktur M15",
+  "entry_signal": "buy|sell|none",
+  "entry_reason": "konfluensi yang terdeteksi di M1",
+  "entry_price": 0.0,
+  "stop_loss": 0.0,
+  "take_profit": 0.0,
+  "risk_reward": 0.0,
+  "confidence": 0.0,
+  "error_check": "apakah ada potensi kesalahan yang terdeteksi dari memory?",
+  "skip_reason": "alasan skip jika entry=none"
+}}
+"""
+
+    def _analyze_with_groq(
+        self, market_context: dict, iteration: int = 1
+    ) -> Optional[dict]:
+        """
+        Analisis market dengan Groq AI.
+        Melakukan self-iteration jika AI mendeteksi error dari memory.
+        """
+        iteration_note = ""
+        if iteration > 1:
+            prev_error = self.memory.get_last_iteration_error()
+            if prev_error:
+                iteration_note = f"\n\n[ITERASI {iteration}] Perbaiki analisis. Error iterasi sebelumnya: {prev_error}"
+
+        user_prompt = f"""
+Analisis kondisi market saat ini untuk {self.symbol}:
+
+=== DATA M15 (MARKET BIAS) ===
+{json.dumps(market_context['m15'], indent=2)}
+
+=== DATA M1 (KONFIRMASI ENTRY) ===
+{json.dumps(market_context['m1'], indent=2)}
+
+=== HARGA SAAT INI ===
+Bid: {market_context['current_price']['bid']}
+Ask: {market_context['current_price']['ask']}
+Spread: {market_context['current_price']['spread']} pip
+Waktu: {market_context['timestamp']}
+
+=== POSISI AKTIF ===
+{json.dumps(market_context.get('open_positions', []), indent=2)}
+{iteration_note}
+
+Berikan analisis ICT dan keputusan trading dalam format JSON yang ditentukan.
+"""
+
+        logger.info(f"Mengirim ke Groq AI (iterasi {iteration})...")
+
+        response = self.groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": self._build_system_prompt()},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,  # Low temperature untuk konsistensi
+            max_tokens=1024,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content
+        logger.info(f"Groq response: {raw}")
+        return json.loads(raw)
+
+    def _validate_signal(self, signal: dict, market_context: dict) -> tuple[bool, str]:
+        """
+        Validasi sinyal dari Groq AI.
+        Returns: (is_valid, error_message)
+        """
+        if signal["entry_signal"] == "none":
+            return True, ""
+
+        current_bid = market_context["current_price"]["bid"]
+        current_ask = market_context["current_price"]["ask"]
+        spread = market_context["current_price"]["spread"]
+
+        # Validasi spread
+        if spread > 3.0:
+            return False, f"Spread terlalu lebar: {spread} pip"
+
+        # Validasi SL tidak lebih dekat dari 5 pip
+        if signal["entry_signal"] == "buy":
+            sl_distance = abs(current_ask - signal["stop_loss"]) * 10000
+            if sl_distance < 5:
+                return False, f"SL terlalu dekat dari entry: {sl_distance:.1f} pip"
+            if signal["stop_loss"] >= current_ask:
+                return False, "SL buy harus di bawah entry price"
+            if signal["take_profit"] <= current_ask:
+                return False, "TP buy harus di atas entry price"
+
+        elif signal["entry_signal"] == "sell":
+            sl_distance = abs(signal["stop_loss"] - current_bid) * 10000
+            if sl_distance < 5:
+                return False, f"SL terlalu dekat dari entry: {sl_distance:.1f} pip"
+            if signal["stop_loss"] <= current_bid:
+                return False, "SL sell harus di atas entry price"
+            if signal["take_profit"] >= current_bid:
+                return False, "TP sell harus di bawah entry price"
+
+        # Validasi Risk Reward minimum 1.5:1
+        if signal["risk_reward"] < 1.5:
+            return False, f"RR terlalu rendah: {signal['risk_reward']:.2f} (min 1.5:1)"
+
+        # Validasi confidence minimum
+        if signal["confidence"] < 0.6:
+            return False, f"Confidence terlalu rendah: {signal['confidence']:.0%}"
+
+        return True, ""
+
+    def run_analysis_cycle(self) -> Optional[dict]:
+        """
+        Satu siklus analisis + self-iteration jika ada error.
+        """
+        logger.info("=" * 50)
+        logger.info(f"Memulai siklus analisis | {datetime.now(timezone.utc).isoformat()}")
+
+        # 1. Ambil data market
+        market_context = self.market_data.get_full_context()
+        if not market_context:
+            logger.error("Gagal mengambil data market")
+            return None
+
+        # 2. Analisis ICT preliminary (Python-side, sebelum AI)
+        ict_pre = self.ict_analyzer.quick_check(market_context)
+        market_context["ict_preliminary"] = ict_pre
+        logger.info(f"ICT preliminary: {ict_pre}")
+
+        # 3. Loop self-iteration dengan Groq AI
+        signal = None
+        for iteration in range(1, self.max_iterations + 1):
+            try:
+                signal = self._analyze_with_groq(market_context, iteration)
+            except json.JSONDecodeError as e:
+                error_msg = f"JSON parse error iterasi {iteration}: {e}"
+                logger.error(error_msg)
+                self.memory.log_iteration_error(error_msg)
+                continue
+            except Exception as e:
+                error_msg = f"Groq API error: {e}"
+                logger.error(error_msg)
+                self.memory.log_error(
+                    error=error_msg,
+                    lesson="Periksa koneksi API dan format request",
+                    context=market_context,
+                )
+                return None
+
+            # Validasi sinyal
+            is_valid, validation_error = self._validate_signal(signal, market_context)
+
+            if is_valid:
+                logger.info(
+                    f"Sinyal valid pada iterasi {iteration}: {signal['entry_signal']}"
+                )
+                break
+            else:
+                logger.warning(
+                    f"Validasi gagal (iterasi {iteration}): {validation_error}"
+                )
+                self.memory.log_iteration_error(validation_error)
+
+                if iteration == self.max_iterations:
+                    logger.warning("Max iterasi tercapai, skip trade")
+                    self.memory.log_error(
+                        error=f"Max iterasi: {validation_error}",
+                        lesson=f"AI terus menghasilkan sinyal invalid: {validation_error}",
+                        context={"signal": signal, "market": market_context},
+                    )
+                    return None
+
+        if not signal:
+            return None
+
+        # 4. Eksekusi trade jika ada sinyal
+        if signal["entry_signal"] in ["buy", "sell"]:
+            # Sync balance live dari Bybit sebelum kalkulasi
+            live_balance = self.executor.get_account_balance()
+            if live_balance > 0:
+                self.risk_manager.account_balance = live_balance
+            lot_size = self.risk_manager.calculate_lot_size(
+                entry=signal["entry_price"],
+                stop_loss=signal["stop_loss"],
+                symbol=self.symbol,
+            )
+
+            trade_result = self.executor.execute(
+                direction=signal["entry_signal"],
+                entry_price=signal["entry_price"],
+                stop_loss=signal["stop_loss"],
+                take_profit=signal["take_profit"],
+                lot_size=lot_size,
+                signal=signal,
+            )
+
+            # Simpan ke memory
+            self.memory.log_trade(
+                symbol=self.symbol,
+                direction=signal["entry_signal"],
+                setup=signal.get("bias_reason", ""),
+                entry=signal["entry_price"],
+                sl=signal["stop_loss"],
+                tp=signal["take_profit"],
+                rr=signal["risk_reward"],
+                confidence=signal["confidence"],
+                notes=signal.get("entry_reason", ""),
+                trade_id=trade_result.get("trade_id"),
+            )
+
+            logger.info(
+                f"Trade dieksekusi: {signal['entry_signal'].upper()} "
+                f"@ {signal['entry_price']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}"
+            )
+
+        else:
+            logger.info(f"No trade: {signal.get('skip_reason', 'Tidak ada setup')}")
+
+        return signal
+
+    def monitor_open_trades(self):
+        """Monitor trade yang aktif dan update hasil ke memory."""
+        closed = self.executor.check_closed_trades()
+        for trade in closed:
+            self.memory.update_trade_result(
+                trade_id=trade["trade_id"],
+                result=trade["result"],  # "win" | "loss"
+                pnl=trade["pnl"],
+                exit_price=trade["exit_price"],
+                exit_reason=trade["exit_reason"],
+            )
+            logger.info(
+                f"Trade closed: {trade['result'].upper()} | PnL: {trade['pnl']:.2f}"
+            )
+
+            # Jika loss, minta AI untuk introspeksi
+            if trade["result"] == "loss":
+                self._post_trade_analysis(trade)
+
+    def _post_trade_analysis(self, closed_trade: dict):
+        """Minta Groq AI untuk menganalisis trade yang loss."""
+        logger.info("Melakukan post-trade analysis untuk trade yang loss...")
+        try:
+            response = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Kamu adalah mentor trading ICT yang menganalisis kesalahan untuk pembelajaran.",
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+Analisis trade yang loss berikut dan identifikasi kesalahan spesifik:
+
+Trade Data:
+{json.dumps(closed_trade, indent=2)}
+
+Berikan analisis dalam format JSON:
+{{
+  "kesalahan_utama": "deskripsi kesalahan",
+  "pelajaran": "apa yang harus diperbaiki",
+  "kondisi_yang_seharusnya_skip": "kapan seharusnya tidak entry",
+  "perbaikan_untuk_besok": "rule tambahan yang harus diterapkan"
+}}
+""",
+                    },
+                ],
+                temperature=0.3,
+                max_tokens=512,
+                response_format={"type": "json_object"},
+            )
+
+            analysis = json.loads(response.choices[0].message.content)
+            self.memory.log_error(
+                error=analysis["kesalahan_utama"],
+                lesson=analysis["pelajaran"],
+                context={
+                    "trade": closed_trade,
+                    "skip_condition": analysis["kondisi_yang_seharusnya_skip"],
+                    "improvement": analysis["perbaikan_untuk_besok"],
+                },
+            )
+            logger.info(f"Post-trade lesson saved: {analysis['pelajaran']}")
+
+        except Exception as e:
+            logger.error(f"Post-trade analysis failed: {e}")
+
+    async def run(self):
+        """Main loop bot trading."""
+        logger.info("=" * 60)
+        logger.info("ICT Trading Bot dengan Groq AI + Memory System")
+        logger.info(f"Symbol: {self.symbol} | Mode: {'PAPER' if self.paper_trading else 'LIVE'}")
+        logger.info("=" * 60)
+
+        while True:
+            try:
+                # Monitor trade aktif
+                self.monitor_open_trades()
+
+                # Jalankan satu siklus analisis
+                self.run_analysis_cycle()
+
+                # Tampilkan statistik memori
+                stats = self.memory.get_stats()
+                logger.info(
+                    f"Stats | Total: {stats['total_trades']} | "
+                    f"Win: {stats['wins']} | Loss: {stats['losses']} | "
+                    f"WR: {stats['win_rate']:.0%} | Errors logged: {stats['total_errors']}"
+                )
+
+            except KeyboardInterrupt:
+                logger.info("Bot dihentikan oleh user")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error di main loop: {e}", exc_info=True)
+                self.memory.log_error(
+                    error=str(e),
+                    lesson="Unhandled exception - perlu review kode",
+                    context={"type": type(e).__name__},
+                )
+
+            logger.info(f"Menunggu {self.scan_interval} detik...\n")
+            await asyncio.sleep(self.scan_interval)
