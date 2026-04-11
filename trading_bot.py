@@ -17,7 +17,8 @@ from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 
-# Setup logging
+# Setup logging — buat folder logs dulu sebelum FileHandler
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -307,6 +308,13 @@ ATURAN DISKUSI:
 - Jangan terlalu panjang per pesan — max 3-4 kalimat per giliran bicara
 - JANGAN ubah entry_price, SL, TP dari sinyal utama
 
+TOPIK WAJIB DIBAHAS DALAM DISKUSI:
+1. Entry ideal: zona/harga terbaik untuk masuk berdasarkan struktur ICT (OB, FVG, MSS, rejection)
+2. Timing entry: kapan tepatnya harus entry — sebelum/sesudah candle close? Di level apa?
+3. Konfluensi tambahan: ada level tambahan yang memperkuat entry? (EQH/EQL, SIBI/BISI, premium/discount)
+4. Risiko entry: skenario yang bikin entry ini jadi jelek — dan cara mitigasinya
+5. Alternatif entry: kalau harga skip zona ideal, entry plan B-nya di mana?
+
 SINYAL ICT UTAMA (jangan diubah):
 {json.dumps(signal, indent=2)}
 
@@ -388,14 +396,19 @@ Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
 
                 if round_num == 3:
                     task_note = (
-                        "Ini RONDE TERAKHIR. Setelah semua berdiskusi, berikan kesimpulan akhirmu: "
-                        "setuju/tidak dengan sinyal, ada yang perlu diwaspadai, dan kondisi reentry jika loss. "
-                        "Tetap gaya WA, tapi lebih to-the-point."
+                        "Ini RONDE TERAKHIR. Berikan kesimpulan akhirmu yang mencakup: "
+                        "(1) setuju/tidak dengan sinyal utama, "
+                        "(2) zona/harga entry ideal menurutmu dan kenapa, "
+                        "(3) timing entry terbaik, "
+                        "(4) satu risiko terbesar yang harus diwaspadai, "
+                        "(5) kondisi reentry jika loss. "
+                        "Tetap gaya WA, padat dan to-the-point."
                     )
                 else:
                     task_note = (
                         f"Ini Ronde {round_num}. Respons pendapat yang sudah disampaikan — "
-                        "bisa setuju, bantah, atau tanya ke salah satu analis lain."
+                        "bisa setuju, bantah, atau tanya ke salah satu analis lain. "
+                        "Fokus ke: zona entry ideal, timing, dan risiko tersembunyi."
                     )
 
                 user_msg = f"""=== RIWAYAT DISKUSI ===
@@ -458,6 +471,9 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
   "consensus": "setuju_lanjut | hati_hati | skip_disarankan",
   "poin_sepakat": "hal-hal yang disepakati ketiga analis",
   "poin_debat": "hal-hal yang masih diperdebatkan",
+  "entry_ideal_zona": "zona/level harga entry terbaik berdasarkan diskusi (misal: OB M15 di 3245-3248, FVG fill di 3250)",
+  "entry_ideal_timing": "kapan tepatnya entry — kondisi candle/konfluensi yang harus ada sebelum eksekusi",
+  "entry_plan_b": "alternatif entry jika harga skip zona ideal — di mana dan syaratnya apa",
   "risiko_utama": "risiko terbesar yang teridentifikasi dari diskusi",
   "pengembangan_setup": "pengembangan konkret untuk setup ini berdasarkan diskusi",
   "kondisi_reentry": "kondisi reentry jika loss — berdasarkan diskusi",
