@@ -398,6 +398,11 @@ Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
                 )
                 return resp.choices[0].message.content.strip()
             except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    logger.warning(f"[RATE LIMIT] {p['nama']} (AI Panel) kena rate limit | Key: AI-{ai_id[-1]} | {err_str[:120]}")
+                else:
+                    logger.error(f"[ERROR] {p['nama']} (AI Panel): {err_str[:120]}")
                 return f"{p['singkatan']}: [error: {e}]"
 
         if round_num == 1:
@@ -519,7 +524,11 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
             )
             return json.loads(resp.choices[0].message.content)
         except Exception as e:
-            logger.warning(f"[PANEL CONCLUSION] error: {e}")
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                logger.warning(f"[RATE LIMIT] Nova (GROQ_API_KEY_AI2) kena rate limit saat menyusun kesimpulan | {err_str[:120]}")
+            else:
+                logger.warning(f"[PANEL CONCLUSION] error: {err_str[:120]}")
             return {"consensus": "error", "error": str(e), "avg_panel_confidence": 0.0}
 
     def _yusuf_opening(self, signal: dict, market_context: dict, loss_context: str = "") -> str:
@@ -554,6 +563,11 @@ Tulis HANYA pesanmu (plain text). Max 5-6 kalimat."""
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                logger.warning(f"[RATE LIMIT] Yusuf (GROQ_API_KEY) kena rate limit saat opening | {err_str[:150]}")
+            else:
+                logger.error(f"[ERROR] Yusuf opening: {err_str[:150]}")
             return f"Yusuf: [error opening: {e}]"
 
     def _yusuf_closing(self, all_messages: list, signal: dict) -> str:
@@ -584,6 +598,11 @@ Gaya WA, tegas dan decisive. Max 4-5 kalimat."""
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                logger.warning(f"[RATE LIMIT] Yusuf (GROQ_API_KEY) kena rate limit saat closing | {err_str[:150]}")
+            else:
+                logger.error(f"[ERROR] Yusuf closing: {err_str[:150]}")
             return f"Yusuf: [error closing: {e}]"
 
     def _run_ai_panel(self, signal: dict, market_context: dict, loss_context: str = "") -> dict:
@@ -712,10 +731,13 @@ Gaya WA, tegas dan decisive. Max 4-5 kalimat."""
                 self.memory.log_iteration_error(error_msg)
                 continue
             except Exception as e:
-                error_msg = f"Groq API error: {e}"
-                logger.error(error_msg)
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    logger.warning(f"[RATE LIMIT] Yusuf (GROQ_API_KEY) kena rate limit di analisis ICT utama | {err_str[:150]}")
+                else:
+                    logger.error(f"Groq API error: {err_str[:150]}")
                 self.memory.log_error(
-                    error=error_msg,
+                    error=f"Groq API error: {err_str[:100]}",
                     lesson="Periksa koneksi API dan format request",
                     context=market_context,
                 )
