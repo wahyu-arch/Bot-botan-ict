@@ -355,112 +355,116 @@ Harga: {json.dumps(market_context.get('current_price', {}), indent=2)}
         loss_context: str = "",
     ) -> list:
         """
-        Jalankan 1 ronde diskusi: setiap AI merespons chat history yang ada.
-        Urutan bicara: Arka → Nova → Zara (tiap AI lihat pesan sebelumnya di ronde ini juga).
-        Returns list pesan baru di ronde ini.
-        """
-        import concurrent.futures
+        Alur diskusi 2 ronde:
 
+        RONDE 1 — Sekuensial, urutan ketat:
+          1. Arka (AI-1) analisis duluan — opening statement lengkap
+          2. Nova (AI-2) baca Arka → cari kelemahan dulu → baru kasih analisis sendiri
+          3. Zara (AI-3) baca Arka & Nova → cari kelemahan keduanya → kasih analisis sendiri
+
+        RONDE 2 — Sekuensial, closing:
+          Tiap AI respons perdebatan ronde 1 + berikan kesimpulan akhir masing-masing.
+        """
         round_messages = []
         ai_order = ["AI-1", "AI-2", "AI-3"]
 
-        # Di ronde 1: paralel (belum ada konteks satu sama lain di ronde ini)
-        # Di ronde 2-3: sekuensial agar tiap AI bisa baca pesan sebelumnya di ronde tsb
-        if round_num == 1:
-            def call_opening(ai_id):
-                p = self.AI_PERSONAS[ai_id]
-                client = self.ai_panel[int(ai_id[-1]) - 1]
-                sys_prompt = self._build_persona_system_prompt(ai_id, signal, market_context, loss_context)
+        def call_ai(ai_id, task_note):
+            p = self.AI_PERSONAS[ai_id]
+            client = self.ai_panel[int(ai_id[-1]) - 1]
+            sys_prompt = self._build_persona_system_prompt(ai_id, signal, market_context, loss_context)
+            full_history = chat_history + round_messages
+            history_text = self._format_history(full_history)
 
-                history_text = self._format_history(chat_history)
-                user_msg = f"""=== RIWAYAT DISKUSI SEJAUH INI ===
-{history_text if history_text else "(Belum ada diskusi — kamu yang mulai duluan sebagai pembuka)"}
+            user_msg = f"""=== RIWAYAT DISKUSI ===
+{history_text if history_text else "(Belum ada pesan — kamu yang membuka diskusi)"}
 
 === GILIRANMU ===
-Ini Ronde {round_num}. Berikan opening statement kamu tentang setup ini.
-Mulai dengan nama kamu, lalu langsung ke analisis. Contoh format:
+{task_note}
+
+Format pesan:
 "{p['singkatan']}: [isi pesanmu]"
 
 Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
 
+            try:
                 resp = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": user_msg},
                     ],
-                    temperature=0.7,
-                    max_tokens=300,
+                    temperature=0.72,
+                    max_tokens=320,
                 )
-                return ai_id, resp.choices[0].message.content.strip()
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                return f"{p['singkatan']}: [error: {e}]"
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {executor.submit(call_opening, ai_id): ai_id for ai_id in ai_order}
-                raw_results = {}
-                for future in concurrent.futures.as_completed(futures):
-                    ai_id, msg = future.result()
-                    raw_results[ai_id] = msg
-            # Urutkan sesuai ai_order
-            for ai_id in ai_order:
-                msg = raw_results.get(ai_id, "")
-                round_messages.append({"ai": ai_id, "nama": self.AI_PERSONAS[ai_id]["nama"], "pesan": msg})
-                logger.info(f"[GRUP RONDE {round_num}] {msg}")
+        if round_num == 1:
+            # ── STEP 1: Arka buka duluan ──
+            task_arka = (
+                "Ini Ronde 1. KAMU YANG PERTAMA BICARA di grup ini. "
+                "Berikan analisis ICT kamu tentang setup ini secara lengkap: "
+                "bias M15, zona entry ideal, timing, SL/TP plan, dan risiko utama. "
+                "Gaya WA santai tapi tajam. Max 4-5 kalimat."
+            )
+            msg_arka = call_ai("AI-1", task_arka)
+            round_messages.append({"ai": "AI-1", "nama": self.AI_PERSONAS["AI-1"]["nama"], "pesan": msg_arka})
+            logger.info(f"[GRUP R1-ARKA] {msg_arka}")
+
+            # ── STEP 2: Nova baca Arka, cari kelemahan, baru kasih analisis sendiri ──
+            task_nova = (
+                "Ronde 1. Arka baru saja kasih analisis di atas. "
+                "JANGAN langsung setuju. Pertama: identifikasi 1-2 kelemahan atau celah dari analisis Arka tadi. "
+                "Setelah itu, berikan analisis kamu sendiri yang berbeda sudut pandangnya — "
+                "dari sisi struktur spasial dan level kunci yang mungkin Arka lewatkan. "
+                "Gaya WA, langsung ke point. Max 4-5 kalimat."
+            )
+            msg_nova = call_ai("AI-2", task_nova)
+            round_messages.append({"ai": "AI-2", "nama": self.AI_PERSONAS["AI-2"]["nama"], "pesan": msg_nova})
+            logger.info(f"[GRUP R1-NOVA] {msg_nova}")
+
+            # ── STEP 3: Zara baca Arka & Nova, cari kelemahan keduanya, kasih analisis sendiri ──
+            task_zara = (
+                "Ronde 1. Arka dan Nova sudah bicara di atas. "
+                "JANGAN langsung setuju dengan keduanya. "
+                "Pertama: temukan kelemahan atau asumsi yang belum dipertanyakan dari KEDUA analisis mereka. "
+                "Setelah itu, berikan perspektif kamu sendiri — "
+                "fokus ke hal yang belum ditanyakan: jebakan likuiditas, anomali tersembunyi, atau sentimen yang diabaikan. "
+                "Gaya WA skeptis dan kritis. Max 4-5 kalimat."
+            )
+            msg_zara = call_ai("AI-3", task_zara)
+            round_messages.append({"ai": "AI-3", "nama": self.AI_PERSONAS["AI-3"]["nama"], "pesan": msg_zara})
+            logger.info(f"[GRUP R1-ZARA] {msg_zara}")
 
         else:
-            # Ronde 2 & 3: sekuensial — tiap AI lihat pesan sebelumnya di ronde ini
+            # ── RONDE 2: Closing — tiap AI respons + kesimpulan akhir ──
+            task_notes = {
+                "AI-1": (
+                    "Ronde 2 — CLOSING. Baca kritik Nova dan Zara terhadap analisismu di ronde 1. "
+                    "Akui jika ada poin valid, tapi pertahankan argumen kalau kamu yakin. "
+                    "Tutup dengan: entry ideal versi finalmu + satu kondisi wajib sebelum entry. "
+                    "Padat, max 4 kalimat."
+                ),
+                "AI-2": (
+                    "Ronde 2 — CLOSING. Lihat respons Arka dan komentar Zara. "
+                    "Berikan pendapatmu tentang siapa yang lebih valid secara struktural. "
+                    "Tutup dengan: level entry konkret yang kamu rekomendasikan + alasannya. "
+                    "Padat, max 4 kalimat."
+                ),
+                "AI-3": (
+                    "Ronde 2 — CLOSING. Ini giliran terakhirmu. "
+                    "Setelah mendengar Arka dan Nova, apakah ada perubahan pandangan? "
+                    "Tetap kritis — jika masih ada risiko yang belum diaddress, sebutkan. "
+                    "Tutup dengan: rekomendasi final kamu (lanjut / hati-hati / skip) + alasan 1 kalimat. "
+                    "Padat, max 4 kalimat."
+                ),
+            }
             for ai_id in ai_order:
                 p = self.AI_PERSONAS[ai_id]
-                client = self.ai_panel[int(ai_id[-1]) - 1]
-                sys_prompt = self._build_persona_system_prompt(ai_id, signal, market_context, loss_context)
-
-                # Gabung: semua history + pesan ronde ini yang sudah terbit
-                full_history = chat_history + round_messages
-                history_text = self._format_history(full_history)
-
-                if round_num == 3:
-                    task_note = (
-                        "Ini RONDE TERAKHIR. Berikan kesimpulan akhirmu yang mencakup: "
-                        "(1) setuju/tidak dengan sinyal utama, "
-                        "(2) zona/harga entry ideal menurutmu dan kenapa, "
-                        "(3) timing entry terbaik, "
-                        "(4) satu risiko terbesar yang harus diwaspadai, "
-                        "(5) kondisi reentry jika loss. "
-                        "Tetap gaya WA, padat dan to-the-point."
-                    )
-                else:
-                    task_note = (
-                        f"Ini Ronde {round_num}. Respons pendapat yang sudah disampaikan — "
-                        "bisa setuju, bantah, atau tanya ke salah satu analis lain. "
-                        "Fokus ke: zona entry ideal, timing, dan risiko tersembunyi."
-                    )
-
-                user_msg = f"""=== RIWAYAT DISKUSI ===
-{history_text}
-
-=== GILIRANMU ===
-{task_note}
-
-Mulai dengan namamu. Format:
-"{p['singkatan']}: [isi pesanmu]"
-
-Tulis HANYA pesanmu saja (plain text)."""
-
-                try:
-                    resp = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": user_msg},
-                        ],
-                        temperature=0.65,
-                        max_tokens=350,
-                    )
-                    msg = resp.choices[0].message.content.strip()
-                except Exception as e:
-                    msg = f"{p['singkatan']}: [error: {e}]"
-
+                msg = call_ai(ai_id, task_notes[ai_id])
                 round_messages.append({"ai": ai_id, "nama": p["nama"], "pesan": msg})
-                logger.info(f"[GRUP RONDE {round_num}] {msg}")
+                logger.info(f"[GRUP R2-{p['nama'].upper()}] {msg}")
 
         return round_messages
 
@@ -518,25 +522,99 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
             logger.warning(f"[PANEL CONCLUSION] error: {e}")
             return {"consensus": "error", "error": str(e), "avg_panel_confidence": 0.0}
 
+    def _yusuf_opening(self, signal: dict, market_context: dict, loss_context: str = "") -> str:
+        """Yusuf (groq_client utama) memberikan analisis ICT pembuka."""
+        loss_note = f"\n\n[REITERASI LOSS]\n{loss_context}" if loss_context else ""
+        prompt = f"""Kamu adalah Yusuf, trader ICT senior yang menganalisis setup dan membagikannya ke grup diskusi.
+Gaya bicara: santai tapi tajam, seperti orang yang sudah berpengalaman. Gaya WA.
+
+Berikan analisis ICT lengkap untuk setup berikut:{loss_note}
+
+SINYAL ICT:
+{json.dumps(signal, indent=2)}
+
+CONTEXT MARKET: Symbol {market_context.get('symbol','N/A')} | Harga: {json.dumps(market_context.get('current_price',{}))}
+
+Tulis analisis kamu mencakup:
+- Bias M15 dan alasannya
+- Zona entry ideal (level konkret)
+- Timing entry (kondisi yang harus terpenuhi)
+- SL/TP plan
+- Risiko utama yang perlu diwaspadai
+
+Format: "Yusuf: [isi pesan]"
+Tulis HANYA pesanmu (plain text). Max 5-6 kalimat."""
+
+        try:
+            resp = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=350,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Yusuf: [error opening: {e}]"
+
+    def _yusuf_closing(self, all_messages: list, signal: dict) -> str:
+        """Yusuf memberikan kesimpulan akhir setelah mendengar diskusi Arka, Nova, Zara."""
+        history = self._format_history(all_messages)
+        prompt = f"""Kamu adalah Yusuf, trader ICT senior. Kamu tadi kasih analisis pembuka, lalu Arka, Nova, dan Zara mendiskusikan dan mengkritisi.
+
+LOG DISKUSI:
+{history}
+
+SINYAL AWAL:
+{json.dumps(signal, indent=2)}
+
+Sekarang berikan KESIMPULAN AKHIR kamu setelah mendengar semua masukan mereka:
+- Apakah ada poin dari Arka/Nova/Zara yang mengubah pandanganmu?
+- Entry final: zona, timing, kondisi wajib
+- Keputusan: lanjut / hati-hati / skip — dan alasannya
+
+Format: "Yusuf: [isi pesan]"
+Gaya WA, tegas dan decisive. Max 4-5 kalimat."""
+
+        try:
+            resp = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=320,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Yusuf: [error closing: {e}]"
+
     def _run_ai_panel(self, signal: dict, market_context: dict, loss_context: str = "") -> dict:
         """
-        Jalankan diskusi grup WhatsApp 3 ronde antara Arka, Nova, Zara.
-        Returns: semua pesan + kesimpulan terstruktur.
+        Alur diskusi grup:
+        1. Yusuf (groq_client) buka dengan analisis ICT — tampil di KANAN
+        2. Arka, Nova, Zara kritisi & diskusi — tampil di KIRI
+        3. Yusuf tutup dengan kesimpulan akhir — tampil di KANAN
         """
         import api_server
         from datetime import timezone
 
-        logger.info("[GRUP DISKUSI] ========== Mulai diskusi 3 ronde ==========")
+        logger.info("[GRUP DISKUSI] ========== Mulai diskusi ==========")
         if loss_context:
-            logger.info(f"[GRUP DISKUSI] Mode: REITERASI LOSS")
+            logger.info("[GRUP DISKUSI] Mode: REITERASI LOSS")
 
-        # Buat session ID unik
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         api_server.start_session(session_id, signal, loss_context)
 
         all_messages = []
 
-        for ronde in range(1, 4):
+        # ── STEP 1: Yusuf analisis pembuka (kanan) ──
+        logger.info("[GRUP DISKUSI] Yusuf opening...")
+        yusuf_open = self._yusuf_opening(signal, market_context, loss_context)
+        msg_yusuf_open = {"ai": "yusuf", "nama": "Yusuf", "pesan": yusuf_open, "side": "right"}
+        all_messages.append(msg_yusuf_open)
+        api_server.push_message("yusuf", "Yusuf", yusuf_open, 0, session_id)
+        logger.info(f"[YUSUF OPEN] {yusuf_open}")
+
+        # ── STEP 2: 2 ronde diskusi Arka, Nova, Zara (kiri) ──
+        for ronde in range(1, 3):
             logger.info(f"[GRUP DISKUSI] --- Ronde {ronde} ---")
             new_msgs = self._run_discussion_round(
                 round_num=ronde,
@@ -545,7 +623,6 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
                 market_context=market_context,
                 loss_context=loss_context,
             )
-            # Push tiap pesan ke API server secara realtime
             for msg in new_msgs:
                 api_server.push_message(
                     ai_id=msg.get("ai", "system"),
@@ -556,7 +633,16 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
                 )
             all_messages.extend(new_msgs)
 
-        logger.info("[GRUP DISKUSI] --- Menyusun kesimpulan ---")
+        # ── STEP 3: Yusuf kesimpulan akhir (kanan) ──
+        logger.info("[GRUP DISKUSI] Yusuf closing...")
+        yusuf_close = self._yusuf_closing(all_messages, signal)
+        msg_yusuf_close = {"ai": "yusuf", "nama": "Yusuf", "pesan": yusuf_close, "side": "right"}
+        all_messages.append(msg_yusuf_close)
+        api_server.push_message("yusuf", "Yusuf", yusuf_close, 99, session_id)
+        logger.info(f"[YUSUF CLOSE] {yusuf_close}")
+
+        # ── Kesimpulan terstruktur (Nova) ──
+        logger.info("[GRUP DISKUSI] Menyusun kesimpulan terstruktur...")
         conclusion = self._extract_panel_conclusion(all_messages, signal, market_context)
         api_server.finish_session(conclusion)
 
@@ -565,7 +651,6 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
             f"avg_confidence={conclusion.get('avg_panel_confidence', 0):.2f}"
         )
 
-        # Log semua chat ke file terpisah agar mudah dibaca
         self._log_group_chat(all_messages, conclusion, loss_context)
 
         return {

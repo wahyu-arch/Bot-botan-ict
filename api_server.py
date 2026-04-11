@@ -24,10 +24,11 @@ def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str)
     if _current_session is None or _current_session["id"] != session_id:
         return
     _current_session["messages"].append({
-        "ai": ai_id.lower().replace("ai-", ""),
+        "ai": {"ai-1":"arka","ai-2":"nova","ai-3":"zara","arka":"arka","nova":"nova","zara":"zara","yusuf":"yusuf"}.get(ai_id.lower(), ai_id.lower()),
         "nama": nama,
         "pesan": pesan,
         "ronde": ronde,
+        "side": "right" if ai_id.lower() == "yusuf" else "left",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
