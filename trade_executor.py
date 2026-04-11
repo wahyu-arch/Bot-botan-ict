@@ -34,12 +34,19 @@ class TradeExecutor:
 
     def _init_bybit(self):
         """Inisialisasi Bybit via pybit v5."""
+        bybit_key = os.environ.get("BYBIT_API_KEY")
+        bybit_secret = os.environ.get("BYBIT_API_SECRET")
+        if not bybit_key or not bybit_secret:
+            raise EnvironmentError(
+                "[FATAL] BYBIT_API_KEY atau BYBIT_API_SECRET tidak ditemukan! "
+                "Tambahkan di Railway: Settings > Variables"
+            )
         try:
             from pybit.unified_trading import HTTP
             self.bybit = HTTP(
                 testnet=os.getenv("BYBIT_TESTNET", "true").lower() == "true",
-                api_key=os.environ["BYBIT_API_KEY"],
-                api_secret=os.environ["BYBIT_API_SECRET"],
+                api_key=bybit_key,
+                api_secret=bybit_secret,
             )
             # Verifikasi koneksi
             resp = self.bybit.get_wallet_balance(accountType="UNIFIED")

@@ -40,14 +40,27 @@ class ICTTradingBot:
 
     def __init__(self):
         # Groq client utama (analisis ICT asli)
-        self.groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        # GROQ_API_KEY utama — fallback ke AI1 jika tidak ada
+        groq_key = (
+            os.environ.get("GROQ_API_KEY")
+            or os.environ.get("GROQ_API_KEY_AI1")
+            or os.environ.get("GROQ_API_KEY_AI2")
+            or os.environ.get("GROQ_API_KEY_AI3")
+        )
+        if not groq_key:
+            raise EnvironmentError(
+                "[FATAL] Tidak ada Groq API key ditemukan! "
+                "Set minimal salah satu: GROQ_API_KEY, GROQ_API_KEY_AI1, GROQ_API_KEY_AI2, atau GROQ_API_KEY_AI3 "
+                "di Railway: Settings > Variables"
+            )
+        self.groq_client = Groq(api_key=groq_key)
 
         # 3 AI Panel analis tambahan — masing-masing punya API key sendiri
         # Fallback ke GROQ_API_KEY jika key spesifik tidak di-set
         self.ai_panel = [
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI1", os.environ["GROQ_API_KEY"])),
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI2", os.environ["GROQ_API_KEY"])),
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI3", os.environ["GROQ_API_KEY"])),
+            Groq(api_key=os.environ.get("GROQ_API_KEY_AI1") or groq_key),
+            Groq(api_key=os.environ.get("GROQ_API_KEY_AI2") or groq_key),
+            Groq(api_key=os.environ.get("GROQ_API_KEY_AI3") or groq_key),
         ]
 
         self.symbol = os.getenv("TRADING_SYMBOL", "XAUUSD")
