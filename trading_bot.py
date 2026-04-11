@@ -54,13 +54,23 @@ class ICTTradingBot:
                 "di Railway: Settings > Variables"
             )
         self.groq_client = Groq(api_key=groq_key)
+        # DIAGNOSTIC — log 8 karakter pertama key untuk verifikasi (bukan full key)
+        key_preview = groq_key[:8] + '...' if groq_key else 'KOSONG'
+        print(f'[DIAGNOSTIC] GROQ_API_KEY aktif: {key_preview}')
+        print(f'[DIAGNOSTIC] Panjang key: {len(groq_key)} karakter')
 
         # 3 AI Panel analis tambahan — masing-masing punya API key sendiri
         # Fallback ke GROQ_API_KEY jika key spesifik tidak di-set
+        key_ai1 = os.environ.get("GROQ_API_KEY_AI1") or groq_key
+        key_ai2 = os.environ.get("GROQ_API_KEY_AI2") or groq_key
+        key_ai3 = os.environ.get("GROQ_API_KEY_AI3") or groq_key
+        print(f"[DIAGNOSTIC] AI1 key: {key_ai1[:8]}... ({len(key_ai1)} char)")
+        print(f"[DIAGNOSTIC] AI2 key: {key_ai2[:8]}... ({len(key_ai2)} char)")
+        print(f"[DIAGNOSTIC] AI3 key: {key_ai3[:8]}... ({len(key_ai3)} char)")
         self.ai_panel = [
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI1") or groq_key),
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI2") or groq_key),
-            Groq(api_key=os.environ.get("GROQ_API_KEY_AI3") or groq_key),
+            Groq(api_key=key_ai1),
+            Groq(api_key=key_ai2),
+            Groq(api_key=key_ai3),
         ]
 
         self.symbol = os.getenv("TRADING_SYMBOL", "XAUUSD")
