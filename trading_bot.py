@@ -77,10 +77,10 @@ class ICTTradingBot:
         # Model per client — pakai model berbeda agar limit tidak saling berbagi
         # Yusuf (groq_client) = model utama untuk analisis ICT
         # AI Panel = model yang lebih ringan, limit terpisah
-        self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "llama3-70b-8192")
-        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "gemma2-9b-it")
+        self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "qwen/qwen3-32b")
+        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "openai/gpt-oss-20b")
         self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "mixtral-8x7b-32768")
-        self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "llama-3.3-70b-versatile")
+        self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "openai/gpt-oss-120b")
         self.model_panel  = [self.model_ai1, self.model_ai2, self.model_ai3]
 
         logger.info(
