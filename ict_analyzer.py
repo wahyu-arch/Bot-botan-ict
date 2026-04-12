@@ -330,3 +330,207 @@ class ICTAnalyzer:
             "prev_session_high": max(highs[-8:-4]),
             "prev_session_low": min(lows[-8:-4]),
         }
+
+    # ─────────────────────────────────────────────────────
+    # IDM (Inducement) Detection
+    # Bullish IDM:
+    #   Candle A buat swing high
+    #   Minimal 1 candle "kosong" setelahnya (tidak tembus high A, close maupun wick)
+    #   Candle selanjutnya tembus (high > high A)
+    #   High candle A itulah level IDM yang harus disentuh untuk konfirmasi
+    # ─────────────────────────────────────────────────────
+
+    def find_idm(self, candles: list, direction: str = "bullish") -> list:
+        """
+        Cari semua IDM (Inducement) pada candle list.
+        direction: 'bullish' atau 'bearish'
+        Return: list of IDM dict, terbaru di belakang
+        """
+        idms = []
+        if len(candles) < 4:
+            return idms
+
+        if direction == "bullish":
+            # Cari swing high (candle A) yang jadi IDM bullish
+            for i in range(1, len(candles) - 2):
+                candle_a = candles[i]
+                high_a = candle_a["high"]
+
+                # Candle A harus lebih tinggi dari sebelum dan sesudahnya (swing high)
+                if candle_a["high"] <= candles[i-1]["high"]:
+                    continue
+
+                # Cari minimal 1 candle kosong setelah A (tidak tembus high A sama sekali)
+                gap_found = False
+                tembus_idx = None
+
+                for j in range(i+1, min(i+10, len(candles))):
+                    c = candles[j]
+                    if c["high"] >= high_a:
+                        # Candle ini tembus — cek apakah ada gap sebelumnya
+                        if gap_found:
+                            tembus_idx = j
+                        break
+                    else:
+                        # Candle ini tidak tembus — bisa jadi "kosong"
+                        gap_found = True
+
+                if tembus_idx and gap_found:
+                    idms.append({
+                        "type": "bullish_idm",
+                        "level": round(high_a, 2),        # Harga IDM = high candle A (presisi)
+                        "candle_a_idx": i,
+                        "candle_a_time": candle_a.get("timestamp", ""),
+                        "tembus_idx": tembus_idx,
+                        "tembus_time": candles[tembus_idx].get("timestamp", ""),
+                        "status": "active",               # active | touched
+                        "candle_a_open": candle_a["open"],
+                        "candle_a_close": candle_a["close"],
+                        "candle_a_low": candle_a["low"],
+                    })
+
+        elif direction == "bearish":
+            # IDM bearish: swing low → gap (tidak tembus low) → tembus low
+            for i in range(1, len(candles) - 2):
+                candle_a = candles[i]
+                low_a = candle_a["low"]
+
+                if candle_a["low"] >= candles[i-1]["low"]:
+                    continue
+
+                gap_found = False
+                tembus_idx = None
+
+                for j in range(i+1, min(i+10, len(candles))):
+                    c = candles[j]
+                    if c["low"] <= low_a:
+                        if gap_found:
+                            tembus_idx = j
+                        break
+                    else:
+                        gap_found = True
+
+                if tembus_idx and gap_found:
+                    idms.append({
+                        "type": "bearish_idm",
+                        "level": round(low_a, 2),
+                        "candle_a_idx": i,
+                        "candle_a_time": candle_a.get("timestamp", ""),
+                        "tembus_idx": tembus_idx,
+                        "tembus_time": candles[tembus_idx].get("timestamp", ""),
+                        "status": "active",
+                        "candle_a_open": candle_a["open"],
+                        "candle_a_close": candle_a["close"],
+                        "candle_a_high": candle_a["high"],
+                    })
+
+        # Kembalikan IDM terbaru (berdasarkan candle_a_idx terbesar)
+        return sorted(idms, key=lambda x: x["candle_a_idx"])
+
+    def get_latest_idm(self, candles: list, direction: str = "bullish") -> dict | None:
+        """Ambil IDM terbaru saja."""
+        idms = self.find_idm(candles, direction)
+        return idms[-1] if idms else None
+
+    def msnr_level(self, candles: list, direction: str = "support") -> list:
+        """
+        MSNR (Malaysian Support/Resistance):
+        Support = close candle bullish terendah di zona
+        Resistance = close candle bearish tertinggi di zona
+        Wick diabaikan — hanya close.
+        """
+        if len(candles) < 5:
+            return []
+
+        levels = []
+        lookback = candles[-30:]
+
+        if direction == "support":
+            # Cari cluster close bullish di level rendah
+            closes = [(i, c["close"]) for i, c in enumerate(lookback)
+                      if c["close"] > c["open"]]  # candle bullish
+            # Ambil yang paling rendah sebagai support
+            closes.sort(key=lambda x: x[1])
+            seen = set()
+            for idx, price in closes[:5]:
+                rounded = round(price, 1)
+                if rounded not in seen:
+                    seen.add(rounded)
+                    levels.append({
+                        "type": "msnr_support",
+                        "level": round(price, 2),
+                        "source": "close_bullish_candle",
+                        "timestamp": lookback[idx].get("timestamp", ""),
+                    })
+
+        elif direction == "resistance":
+            closes = [(i, c["close"]) for i, c in enumerate(lookback)
+                      if c["close"] < c["open"]]  # candle bearish
+            closes.sort(key=lambda x: x[1], reverse=True)
+            seen = set()
+            for idx, price in closes[:5]:
+                rounded = round(price, 1)
+                if rounded not in seen:
+                    seen.add(rounded)
+                    levels.append({
+                        "type": "msnr_resistance",
+                        "level": round(price, 2),
+                        "source": "close_bearish_candle",
+                        "timestamp": lookback[idx].get("timestamp", ""),
+                    })
+
+        return levels
+
+    def check_bos_m1(self, candles: list, direction: str = "bullish", idm_level: float = 0) -> dict | None:
+        """
+        Cek BOS di M1 setelah IDM tersentuh.
+        BOS bullish: setelah IDM bullish disentuh, harga close di atas swing high terakhir
+        BOS bearish: setelah IDM bearish disentuh, harga close di bawah swing low terakhir
+        """
+        if len(candles) < 5 or idm_level == 0:
+            return None
+
+        # Cari swing high/low setelah IDM
+        recent = candles[-15:]
+
+        if direction == "bullish":
+            swing_highs = []
+            for i in range(1, len(recent)-1):
+                if recent[i]["high"] > recent[i-1]["high"] and recent[i]["high"] > recent[i+1]["high"]:
+                    swing_highs.append(recent[i]["high"])
+
+            if not swing_highs:
+                return None
+
+            last_sh = max(swing_highs)
+            last_candle = recent[-1]
+
+            if last_candle["close"] > last_sh:
+                return {
+                    "type": "bullish_bos_m1",
+                    "level": round(last_sh, 2),
+                    "close": round(last_candle["close"], 2),
+                    "timestamp": last_candle.get("timestamp", ""),
+                }
+
+        elif direction == "bearish":
+            swing_lows = []
+            for i in range(1, len(recent)-1):
+                if recent[i]["low"] < recent[i-1]["low"] and recent[i]["low"] < recent[i+1]["low"]:
+                    swing_lows.append(recent[i]["low"])
+
+            if not swing_lows:
+                return None
+
+            last_sl = min(swing_lows)
+            last_candle = recent[-1]
+
+            if last_candle["close"] < last_sl:
+                return {
+                    "type": "bearish_bos_m1",
+                    "level": round(last_sl, 2),
+                    "close": round(last_candle["close"], 2),
+                    "timestamp": last_candle.get("timestamp", ""),
+                }
+
+        return None

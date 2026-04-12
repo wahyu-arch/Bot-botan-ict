@@ -17,6 +17,10 @@ from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 from watchlist_engine import WatchlistEngine
+from specialist_agents import (
+    ai1_m15_analysis, ai2_idm_hunter, ai3_bos_mss_guard,
+    ai4_entry_sniper, loss_debrief
+)
 
 # Setup logging — buat folder logs dulu sebelum FileHandler
 os.makedirs("logs", exist_ok=True)
@@ -146,8 +150,15 @@ class ICTTradingBot:
         self.executor = TradeExecutor(paper_mode=self.paper_trading)
 
         self.watchlist = WatchlistEngine()
-        self._prev_price: float = 0.0   # harga sebelumnya untuk deteksi break
-        self._initial_analysis_done: bool = False  # sudah diskusi awal?
+        self._prev_price: float = 0.0
+        self._initial_analysis_done: bool = False
+
+        # State machine 4 AI spesialis
+        self._current_bias: str = "neutral"       # bias M15 saat ini
+        self._current_idm_level: float = 0.0      # level IDM aktif
+        self._current_bos_level: float = 0.0      # level BOS terkonfirmasi
+        self._phase: str = "m15_scan"             # fase saat ini
+        # Fase: m15_scan → idm_hunt → bos_guard → entry_sniper → done
 
         logger.info(
             f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
@@ -1044,7 +1055,38 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
 
             # Jika loss, minta AI untuk introspeksi
             if trade["result"] == "loss":
-                self._post_trade_analysis(trade)
+                # Loss debrief — 4 AI evaluasi apa yang salah
+                try:
+                    import api_server
+                    debrief = loss_debrief(
+                        clients=self.ai_panel + [self.groq_client],
+                        models=self.model_panel + [self.model_json],
+                        closed_trade=trade,
+                        trade_context={}
+                    )
+                    self.memory.log_error(
+                        error=debrief.get("root_cause", "unknown"),
+                        lesson=debrief.get("lesson", ""),
+                        context={"culprit": debrief.get("culprit"), "new_rule": debrief.get("new_rule")},
+                    )
+                    # Push debrief ke grup chat
+                    session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_debrief"
+                    api_server.start_session(session_id, trade, "LOSS DEBRIEF")
+                    for msg in debrief.get("chat_log", []):
+                        api_server.push_message(
+                            msg.get("ai","system"), msg.get("nama",""), msg.get("pesan",""),
+                            msg.get("ronde",1), session_id
+                        )
+                    api_server.finish_session({
+                        "consensus": "loss_debrief",
+                        "poin_debat": debrief.get("culprit",""),
+                        "risiko_utama": debrief.get("root_cause",""),
+                        "kondisi_reentry": debrief.get("new_rule",""),
+                    })
+                    logger.info(f"[DEBRIEF] Culprit: {debrief.get('culprit')} | {debrief.get('lesson')}")
+                except Exception as e:
+                    logger.error(f"[DEBRIEF ERROR] {e}")
+                    self._post_trade_analysis(trade)
 
     def _post_trade_analysis(self, closed_trade: dict):
         """Minta Groq AI untuk menganalisis trade yang loss."""
@@ -1125,6 +1167,203 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         except Exception as e:
             logger.error(f"Post-trade analysis failed: {e}")
 
+    def _run_specialist_cycle(self, market_context: dict, triggered_item: dict = None) -> dict | None:
+        """
+        Jalankan 4 AI spesialis sesuai fase saat ini.
+        Setiap fase hanya memanggil 1 AI — hemat token.
+
+        Fase:
+          m15_scan    → AI-1 analisis M15, set watchlist M15
+          idm_hunt    → AI-2 cari IDM, set notif level IDM
+          bos_guard   → AI-3 konfirmasi BOS/MSS setelah IDM disentuh
+          entry_sniper → AI-4 tentukan entry, SL, TP
+        """
+        import api_server
+
+        ict_data = market_context.get("ict_preliminary", {})
+        current_price = market_context.get("current_price", {}).get("bid", 0)
+        m1_candles = market_context.get("m1", {}).get("candles", [])
+        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+        phase = self._phase
+        logger.info(f"[SPECIALIST] Fase: {phase.upper()} | Harga: {current_price:.2f}")
+
+        result = {"phase": phase, "session_id": session_id}
+
+        # ── FASE 1: M15 SCAN (AI-1) ──────────────────────
+        if phase == "m15_scan":
+            out = ai1_m15_analysis(
+                self.ai_panel[0], self.model_ai1,
+                ict_data, current_price
+            )
+            self._current_bias = out.get("bias", "neutral")
+            result["ai1"] = out
+
+            # Push ke grup chat
+            if out.get("chat_msg"):
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("ai1", "🔭 AI-1 M15", out["chat_msg"], 1, session_id)
+                api_server.finish_session({"consensus": f"bias_{self._current_bias}"})
+
+            # Set watchlist dari AI-1
+            wl = out.get("watchlist", [])
+            if wl:
+                self.watchlist.clear_untriggered()
+                self.watchlist.add_many(wl, session_id)
+                self._phase = "idm_hunt"
+                logger.info(f"[SPECIALIST] AI-1 selesai | Bias: {self._current_bias} | "
+                           f"Watchlist: {len(wl)} level | Fase → idm_hunt")
+            else:
+                logger.warning("[SPECIALIST] AI-1 tidak set watchlist — retry M15 scan")
+
+        # ── FASE 2: IDM HUNT (AI-2) ──────────────────────
+        elif phase == "idm_hunt":
+            # Cari IDM via Python analyzer dulu (lebih presisi, tanpa token)
+            idm_py = self.ict_analyzer.get_latest_idm(m1_candles, self._current_bias)
+
+            out = ai2_idm_hunter(
+                self.ai_panel[1], self.model_ai2,
+                ict_data, idm_py, self._current_bias, current_price
+            )
+            self._current_idm_level = out.get("idm_level", 0)
+            result["ai2"] = out
+
+            # Push ke grup chat
+            if out.get("chat_msg"):
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("ai2", "🔍 AI-2 IDM", out["chat_msg"], 1, session_id)
+                api_server.finish_session({"consensus": "idm_found" if out.get("idm_valid") else "idm_hunting"})
+
+            wl = out.get("watchlist", [])
+            if wl and self._current_idm_level > 0:
+                self.watchlist.add_many(wl, session_id)
+                self._phase = "bos_guard"
+                logger.info(f"[SPECIALIST] AI-2 selesai | IDM level: {self._current_idm_level:.2f} | "
+                           f"Fase → bos_guard")
+            else:
+                logger.warning("[SPECIALIST] AI-2 IDM belum ditemukan — tetap di fase idm_hunt")
+
+        # ── FASE 3: BOS/MSS GUARD (AI-3) ─────────────────
+        elif phase == "bos_guard":
+            # Cek BOS M1 via Python analyzer
+            bos_py = self.ict_analyzer.check_bos_m1(
+                m1_candles, self._current_bias, self._current_idm_level
+            )
+
+            out = ai3_bos_mss_guard(
+                self.ai_panel[2], self.model_ai3,
+                ict_data, bos_py, self._current_idm_level,
+                self._current_bias, current_price
+            )
+            decision = out.get("decision", "wait")
+            result["ai3"] = out
+
+            # Push ke grup
+            if out.get("chat_msg"):
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("ai3", "⚡ AI-3 BOS/MSS", out["chat_msg"], 1, session_id)
+                api_server.finish_session({"consensus": decision})
+
+            if decision == "bos":
+                self._current_bos_level = bos_py["level"] if bos_py else current_price
+                self._phase = "entry_sniper"
+                logger.info(f"[SPECIALIST] AI-3: BOS dikonfirmasi @ {self._current_bos_level:.2f} | "
+                           f"Fase → entry_sniper")
+            elif decision == "mss":
+                # Reset ke IDM hunt — cari IDM baru
+                self._current_idm_level = 0
+                self._phase = "idm_hunt"
+                logger.info("[SPECIALIST] AI-3: MSS — kembali ke IDM hunt")
+                # Set watchlist dari AI-3
+                wl = out.get("watchlist", [])
+                if wl:
+                    self.watchlist.add_many(wl, session_id)
+            else:
+                # Wait — set watchlist konfirmasi
+                wl = out.get("watchlist", [])
+                if wl:
+                    self.watchlist.add_many(wl, session_id)
+                logger.info("[SPECIALIST] AI-3: Menunggu konfirmasi BOS/MSS")
+
+        # ── FASE 4: ENTRY SNIPER (AI-4) ──────────────────
+        elif phase == "entry_sniper":
+            # MSNR dari Python analyzer
+            msnr_dir = "support" if self._current_bias == "bullish" else "resistance"
+            msnr_levels = self.ict_analyzer.msnr_level(m1_candles, msnr_dir)
+
+            # Trade memory untuk referensi AI-4
+            trade_mem = self.memory.get_recent_trades(limit=5)
+
+            out = ai4_entry_sniper(
+                self.groq_client, self.model_json,
+                ict_data, msnr_levels, current_price,
+                self._current_bias, self._current_bos_level,
+                trade_mem
+            )
+            result["ai4"] = out
+
+            # Push ke grup
+            if out.get("chat_msg"):
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("yusuf", "🎯 AI-4 Entry", out["chat_msg"], 1, session_id)
+                api_server.finish_session({
+                    "consensus": "setuju_lanjut" if out.get("confidence", 0) >= 0.65 else "hati_hati",
+                    "entry_ideal_zona": str(out.get("entry", "")),
+                    "entry_ideal_timing": out.get("setup_type", ""),
+                    "risiko_utama": f"SL di {out.get('sl',0):.2f} ({out.get('sl_reason','')})",
+                    "avg_panel_confidence": out.get("confidence", 0),
+                })
+
+            # Eksekusi kalau confidence cukup
+            entry = out.get("entry", 0)
+            sl    = out.get("sl", 0)
+            tp    = out.get("tp", 0)
+            conf  = out.get("confidence", 0)
+
+            if entry > 0 and sl > 0 and tp > 0 and conf >= 0.6:
+                logger.info(f"[SPECIALIST] AI-4 Entry signal | {self._current_bias.upper()} "
+                           f"@ {entry:.2f} | SL {sl:.2f} | TP {tp:.2f} | conf {conf:.0%}")
+
+                # Sync balance
+                live_balance = self.executor.get_account_balance()
+                if live_balance > 0:
+                    self.risk_manager.account_balance = live_balance
+
+                lot_size = self.risk_manager.calculate_lot_size(
+                    entry=entry, stop_loss=sl, symbol=self.symbol
+                )
+                direction = "buy" if self._current_bias == "bullish" else "sell"
+
+                trade_result = self.executor.execute(
+                    direction=direction,
+                    entry_price=entry,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    lot_size=lot_size,
+                    signal={"entry_signal": direction, "confidence": conf,
+                            "bias_reason": f"AI-4 {out.get('setup_type','')}"},
+                )
+                self.memory.log_trade(
+                    symbol=self.symbol, direction=direction,
+                    setup=out.get("setup_type", ""), entry=entry,
+                    sl=sl, tp=tp, rr=out.get("rr", 0),
+                    confidence=conf, notes=out.get("chat_msg", ""),
+                    trade_id=trade_result.get("trade_id"),
+                )
+                result["executed"] = True
+            else:
+                logger.info(f"[SPECIALIST] AI-4 skip eksekusi | conf={conf:.0%} | entry={entry} sl={sl} tp={tp}")
+                result["executed"] = False
+
+            # Reset ke M15 scan untuk siklus berikutnya
+            self._phase = "m15_scan"
+            self._current_idm_level = 0
+            self._current_bos_level = 0
+            logger.info("[SPECIALIST] Siklus selesai — reset ke m15_scan")
+
+        api_server.update_watchlist(self.watchlist.to_api_dict())
+        return result
+
     async def run(self):
         """
         Main loop — trigger-based, bukan time-based.
@@ -1161,96 +1400,55 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 ict_pre = self.ict_analyzer.quick_check(market_context)
                 market_context["ict_preliminary"] = ict_pre
 
-                # ── SIKLUS PERTAMA: analisis awal + set watchlist ──
-                if not self._initial_analysis_done:
-                    logger.info("[BOT] Analisis awal — memanggil AI panel...")
-                    self._prev_price = current_price
+                # ── SCAN HARGA & TRIGGER ──────────────────────────
+                triggered = self.watchlist.check(current_price, self._prev_price)
+
+                if triggered:
+                    for item in triggered:
+                        logger.info(
+                            f"[TRIGGER] 🔔 {item['condition'].upper()} @ {item['level']:.2f} | "
+                            f"for={item.get('for_ai','?')} | {item['reason']}"
+                        )
+                    logger.info(f"[SPECIALIST] {len(triggered)} trigger — jalankan fase {self._phase}")
 
                     try:
-                        # Diskusi awal
-                        signal = self._analyze_with_groq(market_context)
-                        if signal:
-                            panel = self._run_ai_panel(signal, market_context)
-                            signal["ai_panel"] = panel
-
-                        # AI set watchlist level
-                        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                        levels = self._request_watchlist_from_panel(market_context, session_id=session_id)
-                        if levels:
-                            self.watchlist.clear_untriggered()
-                            self.watchlist.add_many(levels, session_id)
-                            # Hanya tandai selesai jika watchlist berhasil di-set
-                            self._initial_analysis_done = True
-                            logger.info(f"[BOT] Analisis awal selesai. Watchlist aktif:\n{self.watchlist.summary()}")
-                        else:
-                            logger.warning("[BOT] Analisis awal gagal set watchlist — akan retry siklus berikutnya")
-
-                        api_server.update_watchlist(self.watchlist.to_api_dict())
-
+                        self._run_specialist_cycle(market_context, triggered[-1])
+                        self._initial_analysis_done = True
                     except Exception as e:
-                        err_str = str(e)
-                        if "429" in err_str or "rate_limit" in err_str.lower():
-                            logger.warning(f"[RATE LIMIT] Analisis awal kena rate limit — retry siklus berikutnya | {err_str[:120]}")
+                        err = str(e)
+                        if "429" in err or "rate_limit" in err.lower() or "413" in err:
+                            logger.warning(f"[RATE LIMIT] Specialist cycle kena limit: {err[:100]}")
                         else:
-                            logger.error(f"[ERROR] Analisis awal gagal: {err_str[:150]}")
-                        # Jangan set _initial_analysis_done = True — retry di siklus berikut
+                            logger.error(f"[ERROR] Specialist cycle: {err[:150]}")
 
+                elif not self._initial_analysis_done:
+                    # Startup — langsung jalankan AI-1 M15 scan
+                    logger.info(f"[SPECIALIST] Startup — jalankan AI-1 M15 scan")
+                    try:
+                        self._run_specialist_cycle(market_context)
+                        self._initial_analysis_done = True
+                    except Exception as e:
+                        err = str(e)
+                        if "429" in err or "413" in err or "rate_limit" in err.lower():
+                            logger.warning(f"[RATE LIMIT] Startup scan: {err[:100]}")
+                        else:
+                            logger.error(f"[ERROR] Startup scan: {err[:150]}")
                 else:
-                    # ── SIKLUS BERIKUTNYA: cek trigger ──
-                    triggered = self.watchlist.check(current_price, self._prev_price)
-
-                    if triggered:
-                        # Ada trigger — panggil AI
-                        for item in triggered:
-                            logger.info(
-                                f"[TRIGGER] 🔔 {item['condition'].upper()} @ {item['level']:.2f} | "
-                                f"{item['phase']} | {item['reason']}"
-                            )
-
-                        logger.info(f"[BOT] {len(triggered)} trigger — memanggil AI panel...")
-
-                        # Analisis ICT + diskusi
-                        signal = self._analyze_with_groq(market_context)
-                        if signal:
-                            panel = self._run_ai_panel(
-                                signal, market_context,
-                                loss_context=f"Trigger: {', '.join(i['reason'][:50] for i in triggered)}"
-                                if all(i.get('phase') == 'waiting_retest' for i in triggered) else ""
-                            )
-                            signal["ai_panel"] = panel
-
-                            # Eksekusi jika ada sinyal entry
-                            if signal.get("entry_signal") in ["buy", "sell"]:
-                                self.run_analysis_cycle()
-
-                        # AI set watchlist baru setelah trigger
-                        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                        new_levels = self._request_watchlist_from_panel(
-                            market_context,
-                            triggered_item=triggered[-1],
-                            session_id=session_id,
-                        )
-                        if new_levels:
-                            self.watchlist.add_many(new_levels, session_id)
-
-                        logger.info(f"[BOT] Watchlist sekarang:\n{self.watchlist.summary()}")
-                        api_server.update_watchlist(self.watchlist.to_api_dict())
-
-                    else:
-                        # Tidak ada trigger — log saja, TIDAK panggil AI
-                        active = self.watchlist.get_active()
+                    # Tidak ada trigger — log harga saja, 0 token
+                    active = self.watchlist.get_active()
+                    logger.info(
+                        f"[BOT] 💰 {current_price:.2f} | "
+                        f"Fase: {self._phase} | "
+                        f"Watchlist: {len(active)} level aktif"
+                    )
+                    if active:
+                        nearest = min(active, key=lambda x: abs(x["level"] - current_price))
+                        dist = abs(nearest["level"] - current_price)
                         logger.info(
-                            f"[BOT] Price: {current_price:.2f} | "
-                            f"Watchlist aktif: {len(active)} level | "
-                            f"Tidak ada trigger"
+                            f"[BOT] Terdekat: {nearest['level']:.2f} "
+                            f"({nearest['condition']}, for {nearest.get('for_ai','?')}) | "
+                            f"Jarak: {dist:.2f}"
                         )
-                        if active:
-                            nearest = min(active, key=lambda x: abs(x["level"] - current_price))
-                            dist = abs(nearest["level"] - current_price)
-                            logger.info(
-                                f"[BOT] Level terdekat: {nearest['level']:.2f} "
-                                f"({nearest['condition']}) | Jarak: {dist:.2f}"
-                            )
 
                 # Monitor trade aktif
                 self.monitor_open_trades()
