@@ -125,7 +125,7 @@ class ICTTradingBot:
         # Yusuf (groq_client) = model utama untuk analisis ICT
         # AI Panel = model yang lebih ringan, limit terpisah
         self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "llama-3.1-8b-instant")
-        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "openai/gpt-oss-20b")
+        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "qwen/qwen3-32b")
         self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "qwen/qwen3-32b")
         self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "qwen/qwen3-32b")
         self.model_panel  = [self.model_ai1, self.model_ai2, self.model_ai3]
