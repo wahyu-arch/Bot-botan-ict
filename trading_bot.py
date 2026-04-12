@@ -125,6 +125,9 @@ class ICTTradingBot:
         self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "qwen/qwen3-32b")
         self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "qwen/qwen3-32b")
         self.model_panel  = [self.model_ai1, self.model_ai2, self.model_ai3]
+        # model_json: model yang dipakai untuk output JSON terstruktur
+        # Gunakan AI1 (lebih ringan) untuk JSON, main hanya untuk teks bebas
+        self.model_json   = os.getenv("GROQ_MODEL_JSON", self.model_ai1)
 
         logger.info(
             f"Models | Main: {self.model_main} | "
@@ -258,7 +261,7 @@ Berikan analisis ICT dan keputusan trading dalam format JSON yang ditentukan.
         logger.info(f"Mengirim ke Groq AI (iterasi {iteration})...")
 
         response = self.groq_client.chat.completions.create(
-            model=self.model_main,
+            model=self.model_json,  # JSON output — pakai model_json
             messages=[
                 {"role": "system", "content": self._build_system_prompt()},
                 {"role": "user", "content": user_prompt},
@@ -268,7 +271,7 @@ Berikan analisis ICT dan keputusan trading dalam format JSON yang ditentukan.
         )
 
         raw = response.choices[0].message.content
-        logger.info(f"Groq response: {raw[:200]}...")
+        logger.info(f"Groq response [{len(raw)} chars]: {raw[:500]}")
         parsed = _parse_json_safe(raw)
         if parsed is None:
             raise json.JSONDecodeError("Tidak bisa parse JSON dari response", raw, 0)
@@ -852,7 +855,7 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
 
         try:
             resp = self.groq_client.chat.completions.create(
-                model=self.model_main,
+                model=self.model_json,  # JSON output — pakai model_json
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,   # Low temperature = lebih presisi, tidak kreatif
                 max_tokens=600,
@@ -1048,7 +1051,7 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
         logger.info("Melakukan post-trade analysis untuk trade yang loss...")
         try:
             response = self.groq_client.chat.completions.create(
-                model=self.model_main,
+                model=self.model_json,  # JSON output — pakai model_json
                 messages=[
                     {
                         "role": "system",
