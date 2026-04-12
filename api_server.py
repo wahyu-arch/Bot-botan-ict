@@ -110,6 +110,65 @@ def get_live():
     return jsonify({"status": "idle", "messages": [], "conclusion": None})
 
 
+@app.route("/api/stats")
+def get_stats():
+    """Statistik trading: total trade, winrate, trade harian selama 30 hari."""
+    import os, json
+    from datetime import datetime, timezone, timedelta
+
+    MEMORY_FILE = "data/trade_memory.json"
+    try:
+        with open(MEMORY_FILE) as f:
+            data = json.load(f)
+        trades = data.get("trades", [])
+    except Exception:
+        trades = []
+
+    total = len(trades)
+    wins   = sum(1 for t in trades if t.get("result") == "win")
+    losses = sum(1 for t in trades if t.get("result") == "loss")
+    wr     = round(wins / total * 100, 1) if total else 0
+
+    # PnL total
+    total_pnl = sum(t.get("pnl", 0) or 0 for t in trades)
+
+    # Trade harian — 30 hari terakhir
+    today = datetime.now(timezone.utc).date()
+    daily = {}
+    for i in range(30):
+        d = (today - timedelta(days=i)).isoformat()
+        daily[d] = {"date": d, "total": 0, "wins": 0, "losses": 0, "pnl": 0}
+
+    for t in trades:
+        ts = t.get("timestamp") or t.get("entry_time") or ""
+        if not ts:
+            continue
+        try:
+            d = ts[:10]  # YYYY-MM-DD
+            if d in daily:
+                daily[d]["total"] += 1
+                if t.get("result") == "win":
+                    daily[d]["wins"] += 1
+                elif t.get("result") == "loss":
+                    daily[d]["losses"] += 1
+                daily[d]["pnl"] += t.get("pnl", 0) or 0
+        except Exception:
+            pass
+
+    # Sort asc untuk chart
+    daily_list = sorted(daily.values(), key=lambda x: x["date"])
+
+    return jsonify({
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wr,
+        "total_pnl": round(total_pnl, 4),
+        "daily": daily_list,
+        "recent_trades": trades[-20:][::-1],  # 20 trade terakhir, terbaru di atas
+    })
+
+
 @app.route("/api/watchlist")
 def get_watchlist():
     """Watchlist level aktif."""

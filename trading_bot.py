@@ -1097,24 +1097,36 @@ Berikan analisis dalam format JSON:
                 # ── SIKLUS PERTAMA: analisis awal + set watchlist ──
                 if not self._initial_analysis_done:
                     logger.info("[BOT] Analisis awal — memanggil AI panel...")
-                    self._initial_analysis_done = True
                     self._prev_price = current_price
 
-                    # Diskusi awal
-                    signal = self._analyze_with_groq(market_context)
-                    if signal:
-                        panel = self._run_ai_panel(signal, market_context)
-                        signal["ai_panel"] = panel
+                    try:
+                        # Diskusi awal
+                        signal = self._analyze_with_groq(market_context)
+                        if signal:
+                            panel = self._run_ai_panel(signal, market_context)
+                            signal["ai_panel"] = panel
 
-                    # AI set watchlist level
-                    session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                    levels = self._request_watchlist_from_panel(market_context, session_id=session_id)
-                    if levels:
-                        self.watchlist.clear_untriggered()
-                        self.watchlist.add_many(levels, session_id)
+                        # AI set watchlist level
+                        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                        levels = self._request_watchlist_from_panel(market_context, session_id=session_id)
+                        if levels:
+                            self.watchlist.clear_untriggered()
+                            self.watchlist.add_many(levels, session_id)
+                            # Hanya tandai selesai jika watchlist berhasil di-set
+                            self._initial_analysis_done = True
+                            logger.info(f"[BOT] Analisis awal selesai. Watchlist aktif:\n{self.watchlist.summary()}")
+                        else:
+                            logger.warning("[BOT] Analisis awal gagal set watchlist — akan retry siklus berikutnya")
 
-                    logger.info(f"[BOT] Watchlist aktif:\n{self.watchlist.summary()}")
-                    api_server.update_watchlist(self.watchlist.to_api_dict())
+                        api_server.update_watchlist(self.watchlist.to_api_dict())
+
+                    except Exception as e:
+                        err_str = str(e)
+                        if "429" in err_str or "rate_limit" in err_str.lower():
+                            logger.warning(f"[RATE LIMIT] Analisis awal kena rate limit — retry siklus berikutnya | {err_str[:120]}")
+                        else:
+                            logger.error(f"[ERROR] Analisis awal gagal: {err_str[:150]}")
+                        # Jangan set _initial_analysis_done = True — retry di siklus berikut
 
                 else:
                     # ── SIKLUS BERIKUTNYA: cek trigger ──
