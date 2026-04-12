@@ -74,6 +74,20 @@ class ICTTradingBot:
             Groq(api_key=key_ai3),
         ]
 
+        # Model per client — pakai model berbeda agar limit tidak saling berbagi
+        # Yusuf (groq_client) = model utama untuk analisis ICT
+        # AI Panel = model yang lebih ringan, limit terpisah
+        self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "llama-3.3-70b-versatile")
+        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "llama-3.3-70b-versatile")
+        self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "llama-3.3-70b-versatile")
+        self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "llama-3.3-70b-versatile")
+        self.model_panel  = [self.model_ai1, self.model_ai2, self.model_ai3]
+
+        logger.info(
+            f"Models | Main: {self.model_main} | "
+            f"Panel: {self.model_ai1} / {self.model_ai2} / {self.model_ai3}"
+        )
+
         self.symbol = os.getenv("TRADING_SYMBOL", "XAUUSD")
         self.paper_trading = os.getenv("PAPER_TRADING", "true").lower() == "true"
         self.max_iterations = int(os.getenv("MAX_AI_ITERATIONS", "3"))
@@ -201,7 +215,7 @@ Berikan analisis ICT dan keputusan trading dalam format JSON yang ditentukan.
         logger.info(f"Mengirim ke Groq AI (iterasi {iteration})...")
 
         response = self.groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=self.model_main,
             messages=[
                 {"role": "system", "content": self._build_system_prompt()},
                 {"role": "user", "content": user_prompt},
@@ -392,8 +406,9 @@ Format pesan:
 Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
 
             try:
+                ai_idx = int(ai_id[-1]) - 1 if ai_id[-1].isdigit() else 0
                 resp = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model=self.model_panel[ai_idx],
                     messages=[
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": user_msg},
@@ -521,7 +536,7 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
 
         try:
             resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.model_panel[1],  # Nova = AI-2
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=600,
@@ -561,7 +576,7 @@ Tulis HANYA pesanmu (plain text). Max 5-6 kalimat."""
 
         try:
             resp = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.model_main,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5,
                 max_tokens=350,
@@ -596,7 +611,7 @@ Gaya WA, tegas dan decisive. Max 4-5 kalimat."""
 
         try:
             resp = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.model_main,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.4,
                 max_tokens=320,
@@ -790,7 +805,7 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
 
         try:
             resp = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.model_main,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,   # Low temperature = lebih presisi, tidak kreatif
                 max_tokens=600,
@@ -985,7 +1000,7 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
         logger.info("Melakukan post-trade analysis untuk trade yang loss...")
         try:
             response = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=self.model_main,
                 messages=[
                     {
                         "role": "system",
