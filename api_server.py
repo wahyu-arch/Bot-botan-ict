@@ -16,6 +16,13 @@ CORS(app)  # Allow semua origin agar HTML bisa fetch dari mana saja
 # ── In-memory store: bot push chat ke sini secara realtime ──
 _live_sessions = []   # list of session dict
 _current_session = None  # session yang sedang berjalan
+_watchlist = []  # level watchlist aktif
+
+
+def update_watchlist(items: list):
+    """Update watchlist dari bot."""
+    global _watchlist
+    _watchlist = items
 
 
 def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str):
@@ -101,6 +108,12 @@ def get_live():
     if _current_session:
         return jsonify(_current_session)
     return jsonify({"status": "idle", "messages": [], "conclusion": None})
+
+
+@app.route("/api/watchlist")
+def get_watchlist():
+    """Watchlist level aktif."""
+    return jsonify(_watchlist)
 
 
 @app.route("/api/latest")

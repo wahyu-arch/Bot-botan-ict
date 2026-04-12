@@ -16,6 +16,7 @@ from ict_analyzer import ICTAnalyzer
 from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
+from watchlist_engine import WatchlistEngine
 
 # Setup logging — buat folder logs dulu sebelum FileHandler
 os.makedirs("logs", exist_ok=True)
@@ -83,6 +84,10 @@ class ICTTradingBot:
         self.memory = MemorySystem()
         self.risk_manager = RiskManager()
         self.executor = TradeExecutor(paper_mode=self.paper_trading)
+
+        self.watchlist = WatchlistEngine()
+        self._prev_price: float = 0.0   # harga sebelumnya untuk deteksi break
+        self._initial_analysis_done: bool = False  # sudah diskusi awal?
 
         logger.info(
             f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
@@ -702,6 +707,138 @@ Gaya WA, tegas dan decisive. Max 4-5 kalimat."""
             logger.warning(f"[GRUP DISKUSI] Gagal simpan log: {e}")
 
 
+    def _request_watchlist_from_panel(
+        self, market_context: dict, triggered_item: dict = None, session_id: str = ""
+    ) -> list:
+        """
+        Minta AI (Yusuf via groq_client) untuk set level watchlist berikutnya
+        berdasarkan kondisi market saat ini.
+
+        KUNCI: AI harus kasih harga PRESISI dari data (bukan rounded).
+        Return: list of {"level": float, "condition": str, "reason": str, "phase": str}
+        """
+        import api_server
+
+        # Konteks trigger
+        trigger_context = ""
+        if triggered_item:
+            trigger_context = f"""
+TRIGGER YANG BARU TERJADI:
+- Level: {triggered_item['level']:.2f}
+- Kondisi: {triggered_item['condition']}
+- Phase: {triggered_item['phase']}
+- Reason: {triggered_item['reason']}
+- Harga saat trigger: {triggered_item.get('triggered_price', 'N/A')}
+"""
+
+        ict_data = market_context.get("ict_preliminary", {})
+        current = market_context.get("current_price", {})
+
+        # Data presisi dari ICT analyzer
+        price_data = f"""
+HARGA PRESISI (gunakan angka PERSIS ini, JANGAN dibulatkan):
+- Bid: {current.get('bid', 0):.2f}
+- Ask: {current.get('ask', 0):.2f}
+
+STRUKTUR M15 (gunakan nilai PERSIS dari data):
+- Bias: {ict_data.get('m15_bias', {}).get('direction', 'N/A')}
+- Swing High: {ict_data.get('m15_bias', {}).get('last_swing_high', 0):.2f}
+- Swing Low: {ict_data.get('m15_bias', {}).get('last_swing_low', 0):.2f}
+
+ORDER BLOCKS M15:
+{chr(10).join([f"  {ob['type'].upper()} OB: High={ob['high']:.2f} Low={ob['low']:.2f}" for ob in ict_data.get('m15_ob', [])[:4]])}
+
+FVG M15:
+{chr(10).join([f"  {fvg['type'].upper()} FVG: {fvg['low']:.2f}-{fvg['high']:.2f} (midpoint={fvg['midpoint']:.2f}) filled={fvg['filled']}" for fvg in ict_data.get('m15_fvg', [])[:4]])}
+
+MSS M1: {ict_data.get('m1_mss', 'None')}
+BOS M15: {ict_data.get('m15_bos', 'None')}
+
+LIQUIDITY POOLS:
+- Recent High: {ict_data.get('liquidity_pools', {}).get('recent_high', 0):.2f}
+- Recent Low: {ict_data.get('liquidity_pools', {}).get('recent_low', 0):.2f}
+"""
+
+        prompt = f"""Kamu adalah Yusuf, trader ICT senior. Analisis kondisi market dan tentukan level watchlist berikutnya.
+{trigger_context}
+{price_data}
+
+TUGASMU:
+Berdasarkan data di atas, tentukan 2-4 level harga PRESISI yang perlu dipantau.
+Level ini adalah harga dimana, jika tersentuh, analisis lebih lanjut diperlukan.
+
+ATURAN KRITIS:
+1. Gunakan angka PERSIS dari data — contoh: 71787.45, bukan 71800
+2. Jika ada OB di 73585.6-73780.0 → gunakan 73585.6 atau 73780.0, BUKAN 73600
+3. FVG midpoint 72320.0 → tulis 72320.0, bukan 72300
+4. Setiap level harus punya alasan ICT yang jelas
+
+KONDISI SAAT INI:
+{"Belum ada BOS — set level untuk konfirmasi BOS atau reversal awal" if not ict_data.get('m15_bos') and not ict_data.get('m1_mss') else "Ada MSS/BOS — set level untuk konfirmasi entry atau invalidasi"}
+
+Berikan response dalam format JSON array (HANYA JSON, tanpa teks lain):
+[
+  {{
+    "level": 71787.45,
+    "condition": "touch|break_above|break_below",
+    "reason": "alasan ICT spesifik dengan referensi ke data",
+    "phase": "waiting_bos|waiting_entry|waiting_retest"
+  }}
+]
+
+PENTING: gunakan angka dari data, bukan perkiraan bulat."""
+
+        try:
+            resp = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,   # Low temperature = lebih presisi, tidak kreatif
+                max_tokens=600,
+                response_format={"type": "json_object"},
+            )
+            raw = resp.choices[0].message.content.strip()
+            # Parse — bisa array langsung atau wrapped dalam object
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                levels = parsed
+            elif isinstance(parsed, dict):
+                # Cari array di dalam object
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        levels = v
+                        break
+                else:
+                    levels = []
+            else:
+                levels = []
+
+            # Validasi setiap item
+            valid_levels = []
+            for lvl in levels:
+                if isinstance(lvl, dict) and "level" in lvl and isinstance(lvl["level"], (int, float)):
+                    valid_levels.append({
+                        "level": float(lvl["level"]),
+                        "condition": lvl.get("condition", "touch"),
+                        "reason": lvl.get("reason", "")[:200],
+                        "phase": lvl.get("phase", "waiting_bos"),
+                    })
+
+            logger.info(f"[WATCHLIST] AI set {len(valid_levels)} level baru")
+            for lvl in valid_levels:
+                logger.info(f"  → {lvl['condition'].upper()} @ {lvl['level']:.2f} [{lvl['phase']}] {lvl['reason'][:80]}")
+
+            # Push watchlist ke API server
+            api_server.update_watchlist(self.watchlist.to_api_dict())
+            return valid_levels
+
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                logger.warning(f"[RATE LIMIT] Yusuf kena rate limit saat set watchlist | {err_str[:120]}")
+            else:
+                logger.error(f"[ERROR] _request_watchlist_from_panel: {err_str[:120]}")
+            return []
+
     def run_analysis_cycle(self) -> Optional[dict]:
         """
         Satu siklus analisis + self-iteration jika ada error.
@@ -922,36 +1059,142 @@ Berikan analisis dalam format JSON:
             logger.error(f"Post-trade analysis failed: {e}")
 
     async def run(self):
-        """Main loop bot trading."""
+        """
+        Main loop — trigger-based, bukan time-based.
+
+        Alur:
+        1. Siklus pertama: analisis awal + AI set watchlist level
+        2. Setiap siklus berikutnya: cek harga vs watchlist
+           - Tidak ada trigger → log harga saja, TIDAK panggil AI
+           - Ada trigger → panggil AI panel diskusi → AI set watchlist baru
+        3. AI hanya dipanggil saat ada EVENT, bukan setiap menit
+        """
+        import api_server
+
         logger.info("=" * 60)
-        logger.info("ICT Trading Bot dengan Groq AI + Memory System")
+        logger.info("ICT Trading Bot — Trigger-Based System")
         logger.info(f"Symbol: {self.symbol} | Mode: {'PAPER' if self.paper_trading else 'LIVE'}")
         logger.info("=" * 60)
 
         while True:
             try:
+                # Ambil data market
+                market_context = self.market_data.get_full_context()
+                if not market_context:
+                    logger.error("Gagal ambil data market")
+                    await asyncio.sleep(self.scan_interval)
+                    continue
+
+                current_price = market_context.get("current_price", {}).get("bid", 0)
+                if not current_price:
+                    await asyncio.sleep(self.scan_interval)
+                    continue
+
+                # ICT preliminary check (Python-side, tidak pakai token)
+                ict_pre = self.ict_analyzer.quick_check(market_context)
+                market_context["ict_preliminary"] = ict_pre
+
+                # ── SIKLUS PERTAMA: analisis awal + set watchlist ──
+                if not self._initial_analysis_done:
+                    logger.info("[BOT] Analisis awal — memanggil AI panel...")
+                    self._initial_analysis_done = True
+                    self._prev_price = current_price
+
+                    # Diskusi awal
+                    signal = self._analyze_with_groq(market_context)
+                    if signal:
+                        panel = self._run_ai_panel(signal, market_context)
+                        signal["ai_panel"] = panel
+
+                    # AI set watchlist level
+                    session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    levels = self._request_watchlist_from_panel(market_context, session_id=session_id)
+                    if levels:
+                        self.watchlist.clear_untriggered()
+                        self.watchlist.add_many(levels, session_id)
+
+                    logger.info(f"[BOT] Watchlist aktif:\n{self.watchlist.summary()}")
+                    api_server.update_watchlist(self.watchlist.to_api_dict())
+
+                else:
+                    # ── SIKLUS BERIKUTNYA: cek trigger ──
+                    triggered = self.watchlist.check(current_price, self._prev_price)
+
+                    if triggered:
+                        # Ada trigger — panggil AI
+                        for item in triggered:
+                            logger.info(
+                                f"[TRIGGER] 🔔 {item['condition'].upper()} @ {item['level']:.2f} | "
+                                f"{item['phase']} | {item['reason']}"
+                            )
+
+                        logger.info(f"[BOT] {len(triggered)} trigger — memanggil AI panel...")
+
+                        # Analisis ICT + diskusi
+                        signal = self._analyze_with_groq(market_context)
+                        if signal:
+                            panel = self._run_ai_panel(
+                                signal, market_context,
+                                loss_context=f"Trigger: {', '.join(i['reason'][:50] for i in triggered)}"
+                                if all(i.get('phase') == 'waiting_retest' for i in triggered) else ""
+                            )
+                            signal["ai_panel"] = panel
+
+                            # Eksekusi jika ada sinyal entry
+                            if signal.get("entry_signal") in ["buy", "sell"]:
+                                self.run_analysis_cycle()
+
+                        # AI set watchlist baru setelah trigger
+                        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                        new_levels = self._request_watchlist_from_panel(
+                            market_context,
+                            triggered_item=triggered[-1],
+                            session_id=session_id,
+                        )
+                        if new_levels:
+                            self.watchlist.add_many(new_levels, session_id)
+
+                        logger.info(f"[BOT] Watchlist sekarang:\n{self.watchlist.summary()}")
+                        api_server.update_watchlist(self.watchlist.to_api_dict())
+
+                    else:
+                        # Tidak ada trigger — log saja, TIDAK panggil AI
+                        active = self.watchlist.get_active()
+                        logger.info(
+                            f"[BOT] Price: {current_price:.2f} | "
+                            f"Watchlist aktif: {len(active)} level | "
+                            f"Tidak ada trigger"
+                        )
+                        if active:
+                            nearest = min(active, key=lambda x: abs(x["level"] - current_price))
+                            dist = abs(nearest["level"] - current_price)
+                            logger.info(
+                                f"[BOT] Level terdekat: {nearest['level']:.2f} "
+                                f"({nearest['condition']}) | Jarak: {dist:.2f}"
+                            )
+
                 # Monitor trade aktif
                 self.monitor_open_trades()
 
-                # Jalankan satu siklus analisis
-                self.run_analysis_cycle()
+                # Update harga sebelumnya
+                self._prev_price = current_price
 
-                # Tampilkan statistik memori
+                # Stats
                 stats = self.memory.get_stats()
                 logger.info(
                     f"Stats | Total: {stats['total_trades']} | "
                     f"Win: {stats['wins']} | Loss: {stats['losses']} | "
-                    f"WR: {stats['win_rate']:.0%} | Errors logged: {stats['total_errors']}"
+                    f"WR: {stats['win_rate']:.0%}"
                 )
 
             except KeyboardInterrupt:
                 logger.info("Bot dihentikan oleh user")
                 break
             except Exception as e:
-                logger.error(f"Unexpected error di main loop: {e}", exc_info=True)
+                logger.error(f"Unexpected error: {e}", exc_info=True)
                 self.memory.log_error(
                     error=str(e),
-                    lesson="Unhandled exception - perlu review kode",
+                    lesson="Unhandled exception",
                     context={"type": type(e).__name__},
                 )
 
