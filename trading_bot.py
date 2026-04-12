@@ -31,6 +31,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _parse_json_safe(raw: str) -> dict | list | None:
+    """
+    Parse JSON dari response model yang tidak support response_format.
+    Coba beberapa strategi: direct parse, extract dari ```json block, extract dari { atau [.
+    """
+    import re, json
+    if not raw:
+        return None
+    raw = raw.strip()
+
+    # 1. Direct parse
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    # 2. Extract dari ```json ... ``` block
+    match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```', raw)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+
+    # 3. Extract JSON object — cari { ... } terluar
+    match = re.search(r'(\{[\s\S]*\})', raw)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+
+    # 4. Extract JSON array — cari [ ... ] terluar
+    match = re.search(r'(\[[\s\S]*\])', raw)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+
+    return None
+
+
 class ICTTradingBot:
     """
     Bot trading dengan strategi ICT:
@@ -161,7 +204,7 @@ FRAMEWORK ANALISIS:
    - Risk 1% per trade adalah FIXED - jangan rekomendasikan qty lebih besar
 {error_context}{win_patterns}
 
-RESPONSE FORMAT (JSON ketat, tanpa teks lain):
+RESPONSE FORMAT — WAJIB: balas HANYA dengan JSON murni, tanpa penjelasan, tanpa markdown, tanpa ```json, langsung mulai dari {{ hingga }}:
 {{
   "bias_m15": "bullish|bearish|neutral",
   "bias_reason": "penjelasan singkat struktur M15",
@@ -222,12 +265,14 @@ Berikan analisis ICT dan keputusan trading dalam format JSON yang ditentukan.
             ],
             temperature=0.1,  # Low temperature untuk konsistensi
             max_tokens=1024,
-            response_format={"type": "json_object"},
         )
 
         raw = response.choices[0].message.content
-        logger.info(f"Groq response: {raw}")
-        return json.loads(raw)
+        logger.info(f"Groq response: {raw[:200]}...")
+        parsed = _parse_json_safe(raw)
+        if parsed is None:
+            raise json.JSONDecodeError("Tidak bisa parse JSON dari response", raw, 0)
+        return parsed
 
     def _validate_signal(self, signal: dict, market_context: dict) -> tuple[bool, str]:
         """
@@ -518,7 +563,7 @@ Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
 === SINYAL ICT UTAMA ===
 {json.dumps(signal, indent=2)}
 
-Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
+WAJIB: balas HANYA JSON murni (tanpa markdown, tanpa penjelasan), langsung dari {{ hingga }}. Jangan ubah entry_price/SL/TP:
 {{
   "consensus": "setuju_lanjut | hati_hati | skip_disarankan",
   "poin_sepakat": "hal-hal yang disepakati ketiga analis",
@@ -540,9 +585,11 @@ Berikan ringkasan dalam format JSON (jangan ubah entry_price/SL/TP):
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=600,
-                response_format={"type": "json_object"},
             )
-            return json.loads(resp.choices[0].message.content)
+            parsed = _parse_json_safe(resp.choices[0].message.content)
+            if parsed is None:
+                raise ValueError("Tidak bisa parse JSON kesimpulan")
+            return parsed
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "rate_limit" in err_str.lower():
@@ -791,7 +838,7 @@ ATURAN KRITIS:
 KONDISI SAAT INI:
 {"Belum ada BOS — set level untuk konfirmasi BOS atau reversal awal" if not ict_data.get('m15_bos') and not ict_data.get('m1_mss') else "Ada MSS/BOS — set level untuk konfirmasi entry atau invalidasi"}
 
-Berikan response dalam format JSON array (HANYA JSON, tanpa teks lain):
+WAJIB: balas HANYA dengan JSON array murni, langsung mulai dari [ tanpa penjelasan, tanpa markdown, tanpa ```json:
 [
   {{
     "level": 71787.45,
@@ -809,11 +856,12 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,   # Low temperature = lebih presisi, tidak kreatif
                 max_tokens=600,
-                response_format={"type": "json_object"},
             )
             raw = resp.choices[0].message.content.strip()
             # Parse — bisa array langsung atau wrapped dalam object
-            parsed = json.loads(raw)
+            parsed = _parse_json_safe(raw)
+            if parsed is None:
+                raise ValueError("Tidak bisa parse JSON watchlist")
             if isinstance(parsed, list):
                 levels = parsed
             elif isinstance(parsed, dict):
@@ -1014,7 +1062,7 @@ Analisis trade yang loss berikut dan identifikasi kesalahan spesifik:
 Trade Data:
 {json.dumps(closed_trade, indent=2)}
 
-Berikan analisis dalam format JSON:
+WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 {{
   "kesalahan_utama": "deskripsi kesalahan",
   "pelajaran": "apa yang harus diperbaiki",
@@ -1026,10 +1074,11 @@ Berikan analisis dalam format JSON:
                 ],
                 temperature=0.3,
                 max_tokens=512,
-                response_format={"type": "json_object"},
             )
 
-            analysis = json.loads(response.choices[0].message.content)
+            analysis = _parse_json_safe(response.choices[0].message.content)
+            if analysis is None:
+                raise ValueError("Tidak bisa parse JSON post-trade")
             self.memory.log_error(
                 error=analysis["kesalahan_utama"],
                 lesson=analysis["pelajaran"],
