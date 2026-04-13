@@ -158,7 +158,11 @@ class ICTTradingBot:
         self._current_idm_level: float = 0.0      # level IDM aktif
         self._current_bos_level: float = 0.0      # level BOS terkonfirmasi
         self._phase: str = "m15_scan"             # fase saat ini
-        # Fase: m15_scan → idm_hunt → bos_guard → entry_sniper → done
+        # Fase: m15_scan → idm_m15_wait → idm_hunt → bos_guard → entry_sniper
+        self._bos_m15: dict = {}                  # BOS M15 yang aktif
+        self._idm_m15: dict = {}                  # IDM M15 yang harus disentuh
+        self._swing_range: dict = {}              # SH/SL range untuk AI-2
+        self._ob_watch_level: float = 0.0         # OB level yang dipantau AI-1
 
         logger.info(
             f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
@@ -1190,58 +1194,183 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
         result = {"phase": phase, "session_id": session_id}
 
-        # ── FASE 1: M15 SCAN (AI-1) ──────────────────────
+        m15_candles = market_context.get("m15", {}).get("candles", [])
+
+        # ── FASE 1: M15 SCAN (AI-1) — Deteksi BOS + IDM M15 ──
         if phase == "m15_scan":
+            # Python hitung semua dulu, tanpa token
+            bos = self.ict_analyzer.find_bos_m15(m15_candles)
+            idm_m15 = self.ict_analyzer.find_idm_after_bos(m15_candles, bos) if bos else None
+            obs = ict_data.get("m15_ob", [])
+            ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
+                m15_candles, obs, bos.get("type","") if bos else ""
+            )
+
             out = ai1_m15_analysis(
                 self.ai_panel[0], self.model_ai1,
-                ict_data, current_price
+                ict_data, current_price,
+                bos_m15=bos, idm_m15=idm_m15, ob_sweep=ob_sweep
             )
             self._current_bias = out.get("bias", "neutral")
+            self._bos_m15 = bos or {}
+            self._idm_m15 = idm_m15 or {}
             result["ai1"] = out
 
-            # Push ke grup chat
             if out.get("chat_msg"):
                 api_server.start_session(session_id, {}, "")
-                api_server.push_message("ai1", "🔭 AI-1 M15", out["chat_msg"], 1, session_id)
+                api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
                 api_server.finish_session({"consensus": f"bias_{self._current_bias}"})
 
-            # Set watchlist dari AI-1
             wl = out.get("watchlist", [])
-            if wl:
+            if wl and out.get("bos_found") and not out.get("fakeout_detected"):
                 self.watchlist.clear_untriggered()
                 self.watchlist.add_many(wl, session_id)
-                self._phase = "idm_hunt"
-                logger.info(f"[SPECIALIST] AI-1 selesai | Bias: {self._current_bias} | "
-                           f"Watchlist: {len(wl)} level | Fase → idm_hunt")
+                self._phase = "idm_m15_wait"  # Tunggu IDM M15 disentuh
+                logger.info(f"[AI-1] BOS {self._current_bias} | IDM M15 @ "
+                           f"{self._idm_m15.get('level',0):.2f} | Fase → idm_m15_wait")
+            elif out.get("fakeout_detected"):
+                # Pasang watchlist konfirmasi OB break
+                if wl:
+                    self.watchlist.clear_untriggered()
+                    self.watchlist.add_many(wl, session_id)
+                logger.info(f"[AI-1] Fakeout OB detected — watchlist konfirmasi OB break")
             else:
-                logger.warning("[SPECIALIST] AI-1 tidak set watchlist — retry M15 scan")
+                logger.info("[AI-1] Belum ada BOS M15 — retry scan berikutnya")
 
-        # ── FASE 2: IDM HUNT (AI-2) ──────────────────────
+        # ── FASE 1b: TUNGGU IDM M15 DISENTUH (AI-1 masih jaga) ──
+        elif phase == "idm_m15_wait":
+            idm_level = self._idm_m15.get("level", 0)
+            idm_type  = self._idm_m15.get("type", "")
+
+            # Cek apakah IDM M15 sudah disentuh (wick atau body)
+            touch = self.ict_analyzer.check_idm_touched(
+                m15_candles, idm_level, self._current_bias
+            )
+
+            # Cek OB sweep paralel
+            obs = ict_data.get("m15_ob", [])
+            ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
+                m15_candles, obs, self._bos_m15.get("type","")
+            )
+
+            if ob_sweep.get("confirmed_break"):
+                # Body close melewati OB low → BOS tidak valid, mulai ulang
+                msg = f"Hiura: OB di-break konfirmasi ({ob_sweep.get('message','')}) — BOS {self._current_bias} batal. Cari BOS baru."
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("ai1", "Hiura", msg, 1, session_id)
+                api_server.finish_session({"consensus": "invalidasi_bos"})
+                self._phase = "m15_scan"
+                self._bos_m15 = {}
+                self._idm_m15 = {}
+                self.watchlist.clear_untriggered()
+                logger.info(f"[AI-1] OB break confirmed — reset ke m15_scan")
+
+            elif ob_sweep.get("fakeout"):
+                # Wick saja → aman, pantau terus
+                logger.info(f"[AI-1] OB wick saja (fakeout) — lanjut pantau IDM M15 @ {idm_level:.2f}")
+
+            elif touch:
+                # IDM M15 disentuh → hitung swing range → serahkan ke AI-2
+                swing_range = self.ict_analyzer.get_swing_range_after_idm_touch(
+                    m15_candles, self._bos_m15, touch
+                )
+                self._swing_range = swing_range
+                sh = swing_range.get("swing_high", 0)
+                sl = swing_range.get("swing_low", 0)
+                m1_dir = swing_range.get("m1_idm_direction", "bearish")
+
+                # OB low untuk dipantau AI-1 paralel dengan AI-2
+                ob_watch = 0
+                for ob in obs:
+                    if self._current_bias == "bullish" and ob.get("type") == "bullish":
+                        ob_watch = ob.get("low", 0)
+                        break
+                    elif self._current_bias == "bearish" and ob.get("type") == "bearish":
+                        ob_watch = ob.get("high", 0)
+                        break
+                self._ob_watch_level = ob_watch
+
+                # Watchlist: OB low (AI-1 jaga) + batas range (AI-2 kerja)
+                wl_new = []
+                if ob_watch > 0:
+                    cond_ob = "break_below" if self._current_bias == "bullish" else "break_above"
+                    wl_new.append({
+                        "level": ob_watch,
+                        "condition": cond_ob,
+                        "reason": f"OB low/high {ob_watch:.2f} — body close = BOS invalid, cari ulang",
+                        "for_ai": "AI-1",
+                        "phase": "ob_body_watch",
+                    })
+
+                self.watchlist.clear_untriggered()
+                if wl_new:
+                    self.watchlist.add_many(wl_new, session_id)
+
+                touch_type = touch.get("touch_type", "wick")
+                msg = (
+                    f"Hiura: IDM M15 {idm_type} disentuh ({touch_type}) di {idm_level:.2f}. "
+                    f"SH={sh:.2f} SL={sl:.2f}. Serahkan ke Senanan cari IDM {m1_dir} M1."
+                    + (f" Pantau OB @ {ob_watch:.2f}." if ob_watch else "")
+                )
+                api_server.start_session(session_id, {}, "")
+                api_server.push_message("ai1", "Hiura", msg, 1, session_id)
+                api_server.finish_session({"consensus": "idm_m15_touched"})
+
+                self._phase = "idm_hunt"
+                logger.info(f"[AI-1] IDM M15 disentuh ({touch_type}) — SH={sh:.2f} SL={sl:.2f} | Fase → idm_hunt")
+            else:
+                logger.info(f"[AI-1] Tunggu IDM M15 @ {idm_level:.2f} | harga {current_price:.2f}")
+
+        # ── FASE 2: IDM HUNT M1 (AI-2) ──────────────────────
         elif phase == "idm_hunt":
-            # Cari IDM via Python analyzer dulu (lebih presisi, tanpa token)
-            idm_py = self.ict_analyzer.get_latest_idm(m1_candles, self._current_bias)
+            # Cek dulu OB watch (AI-1 tetap jaga paralel)
+            if self._ob_watch_level > 0:
+                obs = ict_data.get("m15_ob", [])
+                ob_check = self.ict_analyzer.check_ob_sweep_fakeout(
+                    m15_candles, obs, self._bos_m15.get("type","")
+                )
+                if ob_check.get("confirmed_break"):
+                    msg = f"Hiura: OB di-break body! BOS {self._current_bias} invalid. Senanan stop — cari ulang."
+                    api_server.start_session(session_id, {}, "")
+                    api_server.push_message("ai1", "Hiura", msg, 1, session_id)
+                    api_server.finish_session({"consensus": "invalidasi_bos"})
+                    self._phase = "m15_scan"
+                    self._bos_m15 = {}; self._idm_m15 = {}
+                    self._swing_range = {}; self._ob_watch_level = 0
+                    self.watchlist.clear_untriggered()
+                    logger.info("[AI-1] OB body break saat idm_hunt — reset ke m15_scan")
+                    return result
+
+            # Python cari IDM M1 dalam range SH-SL
+            sh = self._swing_range.get("swing_high", 0)
+            sl = self._swing_range.get("swing_low", 0)
+            m1_dir = self._swing_range.get("m1_idm_direction", "bearish")
+
+            idm_m1 = self.ict_analyzer.find_idm_in_range(
+                m1_candles, m1_dir, sh, sl
+            )
 
             out = ai2_idm_hunter(
                 self.ai_panel[1], self.model_ai2,
-                ict_data, idm_py, self._current_bias, current_price
+                ict_data, idm_m1, self._swing_range, current_price
             )
             self._current_idm_level = out.get("idm_level", 0)
             result["ai2"] = out
 
-            # Push ke grup chat
             if out.get("chat_msg"):
                 api_server.start_session(session_id, {}, "")
-                api_server.push_message("ai2", "🔍 AI-2 IDM", out["chat_msg"], 1, session_id)
-                api_server.finish_session({"consensus": "idm_found" if out.get("idm_valid") else "idm_hunting"})
+                api_server.push_message("ai2", "Senanan", out["chat_msg"], 1, session_id)
+                api_server.finish_session({"consensus": "idm_m1_found" if out.get("idm_valid") else "idm_m1_hunting"})
 
             wl = out.get("watchlist", [])
-            if wl and self._current_idm_level > 0:
+            if wl:
                 self.watchlist.add_many(wl, session_id)
+
+            if out.get("idm_valid") and self._current_idm_level > 0:
                 self._phase = "bos_guard"
-                logger.info(f"[SPECIALIST] AI-2 selesai | IDM level: {self._current_idm_level:.2f} | "
-                           f"Fase → bos_guard")
+                logger.info(f"[AI-2] IDM M1 {m1_dir} @ {self._current_idm_level:.2f} | Fase → bos_guard")
             else:
-                logger.warning("[SPECIALIST] AI-2 IDM belum ditemukan — tetap di fase idm_hunt")
+                logger.info(f"[AI-2] IDM M1 belum terbentuk — pantau range {sl:.2f}–{sh:.2f}")
 
         # ── FASE 3: BOS/MSS GUARD (AI-3) ─────────────────
         elif phase == "bos_guard":

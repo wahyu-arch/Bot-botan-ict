@@ -534,3 +534,267 @@ class ICTAnalyzer:
                 }
 
         return None
+
+    # ─────────────────────────────────────────────────────
+    # AI-1 Logic: BOS M15 → IDM M15 → Swing High/Low
+    # ─────────────────────────────────────────────────────
+
+    def find_bos_m15(self, candles: list) -> dict | None:
+        """
+        Deteksi BOS M15 terbaru.
+        BOS bullish: close candle melewati swing high sebelumnya
+        BOS bearish: close candle melewati swing low sebelumnya
+        Return dict dengan type, level, bos_candle_idx, dan swing_high/low sebelum BOS.
+        """
+        if len(candles) < 10:
+            return None
+
+        lookback = candles[-40:]
+        n = len(lookback)
+
+        # Kumpulkan swing highs dan lows
+        swing_highs = []  # (idx, price)
+        swing_lows  = []  # (idx, price)
+        for i in range(1, n-1):
+            if lookback[i]["high"] > lookback[i-1]["high"] and lookback[i]["high"] > lookback[i+1]["high"]:
+                swing_highs.append((i, lookback[i]["high"]))
+            if lookback[i]["low"] < lookback[i-1]["low"] and lookback[i]["low"] < lookback[i+1]["low"]:
+                swing_lows.append((i, lookback[i]["low"]))
+
+        if not swing_highs or not swing_lows:
+            return None
+
+        # Cari BOS dari candle terbaru ke belakang
+        for i in range(n-1, 5, -1):
+            c = lookback[i]
+
+            # BOS bullish: close di atas swing high sebelumnya
+            prev_highs = [(idx, p) for idx, p in swing_highs if idx < i]
+            if prev_highs:
+                last_sh_idx, last_sh = prev_highs[-1]
+                if c["close"] > last_sh:
+                    # Cari swing low sebelum BOS (untuk IDM M15 bullish)
+                    prev_lows = [(idx, p) for idx, p in swing_lows if idx < last_sh_idx]
+                    last_sl = prev_lows[-1][1] if prev_lows else lookback[0]["low"]
+
+                    # Cari swing high sejak BOS (high tertinggi setelah BOS terbentuk)
+                    post_bos_highs = [lookback[j]["high"] for j in range(last_sh_idx, i+1)]
+                    sh_since_bos = max(post_bos_highs) if post_bos_highs else last_sh
+
+                    return {
+                        "type": "bullish_bos",
+                        "level": round(last_sh, 2),         # level yang ditembus
+                        "bos_close": round(c["close"], 2),
+                        "bos_candle_idx": i,
+                        "bos_time": c.get("timestamp", ""),
+                        "sh_since_bos": round(sh_since_bos, 2),  # SH tertinggi sejak BOS
+                        "sl_before_bos": round(last_sl, 2),      # SL sebelum BOS
+                        # IDM M15 yang harus disentuh = IDM bullish M15 (high candle A)
+                        # dicari terpisah via find_idm_after_bos()
+                    }
+
+            # BOS bearish: close di bawah swing low sebelumnya
+            prev_lows = [(idx, p) for idx, p in swing_lows if idx < i]
+            if prev_lows:
+                last_sl_idx, last_sl = prev_lows[-1]
+                if c["close"] < last_sl:
+                    prev_highs_before = [(idx, p) for idx, p in swing_highs if idx < last_sl_idx]
+                    last_sh = prev_highs_before[-1][1] if prev_highs_before else lookback[0]["high"]
+
+                    post_bos_lows = [lookback[j]["low"] for j in range(last_sl_idx, i+1)]
+                    sl_since_bos = min(post_bos_lows) if post_bos_lows else last_sl
+
+                    return {
+                        "type": "bearish_bos",
+                        "level": round(last_sl, 2),
+                        "bos_close": round(c["close"], 2),
+                        "bos_candle_idx": i,
+                        "bos_time": c.get("timestamp", ""),
+                        "sl_since_bos": round(sl_since_bos, 2),  # SL terendah sejak BOS
+                        "sh_before_bos": round(last_sh, 2),
+                    }
+
+        return None
+
+    def find_idm_after_bos(self, candles: list, bos: dict) -> dict | None:
+        """
+        Cari IDM M15 yang relevan setelah BOS terbentuk.
+
+        BOS bullish → cari IDM bullish M15 (swing high yang di-induce) SETELAH BOS.
+          Level IDM = high candle A yang harus disentuh saat retrace.
+
+        BOS bearish → cari IDM bearish M15 (swing low yang di-induce) SETELAH BOS.
+          Level IDM = low candle A yang harus disentuh saat retrace.
+        """
+        if not bos:
+            return None
+
+        bos_idx = bos.get("bos_candle_idx", 0)
+        bos_type = bos.get("type", "")
+        lookback = candles[-40:]
+
+        # Candle setelah BOS
+        post_bos = lookback[bos_idx:]
+        if len(post_bos) < 3:
+            return None
+
+        if bos_type == "bullish_bos":
+            # Cari IDM bullish setelah BOS: swing high → gap → tembus
+            idms = self.find_idm(post_bos, direction="bullish")
+            if idms:
+                idm = idms[-1]
+                idm["context"] = "m15_after_bullish_bos"
+                idm["watch_condition"] = "touch"  # harga turun sentuh level IDM ini
+                return idm
+
+        elif bos_type == "bearish_bos":
+            idms = self.find_idm(post_bos, direction="bearish")
+            if idms:
+                idm = idms[-1]
+                idm["context"] = "m15_after_bearish_bos"
+                idm["watch_condition"] = "touch"
+                return idm
+
+        return None
+
+    def check_idm_touched(self, candles: list, idm_level: float, direction: str) -> dict | None:
+        """
+        Cek apakah IDM M15 sudah disentuh (wick atau body boleh).
+        direction: arah IDM ('bullish' → level adalah high, sentuh dari bawah ke atas lalu turun)
+
+        Return: dict info candle yang menyentuh, atau None.
+        """
+        if not candles or idm_level <= 0:
+            return None
+
+        for c in reversed(candles[-20:]):
+            # Sentuh = wick atau body melewati/menyentuh level
+            if direction == "bullish":
+                # Harga harus naik ke level IDM (wick high atau close menyentuh)
+                if c["high"] >= idm_level:
+                    return {
+                        "touched": True,
+                        "touch_candle_high": round(c["high"], 2),
+                        "touch_candle_low": round(c["low"], 2),
+                        "touch_candle_close": round(c["close"], 2),
+                        "touch_time": c.get("timestamp", ""),
+                        "touch_type": "body" if c["close"] >= idm_level else "wick",
+                    }
+            elif direction == "bearish":
+                if c["low"] <= idm_level:
+                    return {
+                        "touched": True,
+                        "touch_candle_high": round(c["high"], 2),
+                        "touch_candle_low": round(c["low"], 2),
+                        "touch_candle_close": round(c["close"], 2),
+                        "touch_time": c.get("timestamp", ""),
+                        "touch_type": "body" if c["close"] <= idm_level else "wick",
+                    }
+        return None
+
+    def get_swing_range_after_idm_touch(self, candles: list, bos: dict, touch_info: dict) -> dict:
+        """
+        Setelah IDM M15 disentuh, hitung:
+        - SH = high tertinggi sejak BOS terbentuk (sebelum retrace ke IDM)
+        - SL = low dari candle yang sentuh IDM M15
+
+        Range SH-SL ini diserahkan ke AI-2 untuk cari IDM di M1.
+        """
+        bos_type = bos.get("type", "")
+
+        if bos_type == "bullish_bos":
+            sh = bos.get("sh_since_bos", 0)          # High tertinggi sejak BOS
+            sl = touch_info.get("touch_candle_low", 0)  # Low candle yang sentuh IDM
+            return {
+                "swing_high": round(sh, 2),
+                "swing_low": round(sl, 2),
+                "m1_idm_direction": "bearish",  # M1 retrace → cari IDM bearish di M1
+                "range_valid": sh > sl > 0,
+            }
+        elif bos_type == "bearish_bos":
+            sl = bos.get("sl_since_bos", 0)
+            sh = touch_info.get("touch_candle_high", 0)
+            return {
+                "swing_high": round(sh, 2),
+                "swing_low": round(sl, 2),
+                "m1_idm_direction": "bullish",  # M1 retrace → cari IDM bullish di M1
+                "range_valid": sh > sl > 0,
+            }
+        return {"swing_high": 0, "swing_low": 0, "m1_idm_direction": "unknown", "range_valid": False}
+
+    def check_ob_sweep_fakeout(self, candles: list, obs: list, bos_type: str) -> dict:
+        """
+        Cek apakah ada OB sweep yang berpotensi fakeout.
+
+        BOS bullish: OB di bawah harga saat ini ke-sweep (wick tembus low OB)
+          → Fakeout kalau TIDAK ada close M15 di bawah OB low
+          → Konfirmasi bearish kalau ada close M15 di bawah OB low
+
+        BOS bearish: OB di atas ke-sweep
+          → Fakeout kalau tidak ada close M15 di atas OB high
+        """
+        if not candles or not obs:
+            return {"sweep_detected": False}
+
+        last_candle = candles[-1]
+        result = {"sweep_detected": False, "fakeout": False, "confirmed_break": False}
+
+        for ob in obs:
+            if bos_type == "bullish_bos":
+                ob_low = ob.get("low", 0)
+                ob_high = ob.get("high", 0)
+                # Wick melewati OB low tapi close masih di atas
+                if last_candle["low"] < ob_low and last_candle["close"] > ob_low:
+                    result["sweep_detected"] = True
+                    result["fakeout"] = True
+                    result["ob_level"] = round(ob_low, 2)
+                    result["message"] = f"OB sweep fakeout: wick ke {last_candle['low']:.2f} tapi close {last_candle['close']:.2f} masih di atas OB low {ob_low:.2f} — tunggu dulu"
+                    break
+                # Close di bawah OB low = konfirmasi bearish
+                elif last_candle["close"] < ob_low:
+                    result["sweep_detected"] = True
+                    result["confirmed_break"] = True
+                    result["ob_level"] = round(ob_low, 2)
+                    result["message"] = f"OB break terkonfirmasi: close {last_candle['close']:.2f} di bawah OB low {ob_low:.2f}"
+                    break
+
+            elif bos_type == "bearish_bos":
+                ob_high = ob.get("high", 0)
+                if last_candle["high"] > ob_high and last_candle["close"] < ob_high:
+                    result["sweep_detected"] = True
+                    result["fakeout"] = True
+                    result["ob_level"] = round(ob_high, 2)
+                    result["message"] = f"OB sweep fakeout: wick ke {last_candle['high']:.2f} tapi close {last_candle['close']:.2f} masih di bawah OB high {ob_high:.2f} — tunggu dulu"
+                    break
+                elif last_candle["close"] > ob_high:
+                    result["sweep_detected"] = True
+                    result["confirmed_break"] = True
+                    result["ob_level"] = round(ob_high, 2)
+                    result["message"] = f"OB break terkonfirmasi: close {last_candle['close']:.2f} di atas OB high {ob_high:.2f}"
+                    break
+
+        return result
+
+    def find_idm_in_range(self, candles: list, direction: str,
+                          swing_high: float, swing_low: float) -> dict | None:
+        """
+        Cari IDM di M1 dalam range SH-SL yang diberikan AI-1.
+        direction: 'bearish' (untuk BOS bullish M15) atau 'bullish' (untuk BOS bearish M15)
+
+        Filter: IDM harus berada di dalam range swing_low < level < swing_high
+        """
+        if swing_high <= swing_low or not candles:
+            return None
+
+        # Filter candle yang berada dalam range harga
+        relevant = [c for c in candles if swing_low <= c["low"] and c["high"] <= swing_high * 1.002]
+        if len(relevant) < 4:
+            relevant = candles  # fallback: gunakan semua jika tidak cukup
+
+        idms = self.find_idm(relevant, direction=direction)
+
+        # Filter: level IDM harus dalam range
+        valid = [idm for idm in idms
+                 if swing_low <= idm["level"] <= swing_high]
+
+        return valid[-1] if valid else None

@@ -77,149 +77,186 @@ def _call(client: Groq, model: str, prompt: str, max_tokens: int = 400, temp: fl
 
 # ══════════════════════════════════════════════════════════
 # AI-1: M15 ANALYST
-# Tugas: baca struktur M15, FVG, OB, tentukan bias
-# Output: bias + level watchlist M15 yang perlu dipantau
-# Token: ringan — hanya data M15 ringkas
+# Tugas: deteksi BOS M15 → cari IDM M15 → pasang watchlist
+# Alur:
+#   1. Deteksi BOS M15 (Python sudah hitung)
+#   2. Cari IDM M15 setelah BOS (Python sudah hitung)
+#   3. Pasang watchlist di level IDM M15
+#   4. Cek OB sweep fakeout sebelum serahkan ke AI-2
+# Token: sangat ringan — hanya terima hasil Python, beri narasi
 # ══════════════════════════════════════════════════════════
 
-def ai1_m15_analysis(client: Groq, model: str, ict_data: dict, current_price: float) -> dict:
+def ai1_m15_analysis(client: Groq, model: str, ict_data: dict, current_price: float,
+                     bos_m15: dict = None, idm_m15: dict = None,
+                     ob_sweep: dict = None) -> dict:
     """
-    AI-1 analisis struktur M15.
-    Return: {"bias": "bullish|bearish|neutral", "reason": "...", "watchlist": [...], "chat_msg": "..."}
+    AI-1 narasi BOS + IDM M15, konfirmasi watchlist.
+    Semua deteksi sudah dilakukan Python — AI hanya narasi dan konfirmasi.
     """
-    bias = ict_data.get("m15_bias", {})
-    obs  = ict_data.get("m15_ob", [])[:3]   # max 3 OB
-    fvgs = ict_data.get("m15_fvg", [])[:3]  # max 3 FVG
-    liq  = ict_data.get("liquidity_pools", {})
+    # Jika tidak ada BOS — cukup report neutral
+    if not bos_m15:
+        bias = ict_data.get("m15_bias", {})
+        return {
+            "bias": bias.get("direction", "neutral"),
+            "reason": bias.get("reason", "belum ada BOS"),
+            "bos_found": False,
+            "chat_msg": f"Hiura: belum ada BOS M15 yang bersih. Bias {bias.get('direction','neutral')}. Pantau dulu.",
+            "watchlist": [],
+        }
 
-    # Format ringkas
-    ob_text = "\n".join([
-        f"  {ob['type'].upper()} OB: {ob['low']:.2f}–{ob['high']:.2f} | mitigated={ob['mitigation']}"
-        for ob in obs
-    ]) or "  Tidak ada OB terdeteksi"
+    bos_type = bos_m15.get("type", "")
+    bos_level = bos_m15.get("level", 0)
+    bias = "bullish" if bos_type == "bullish_bos" else "bearish"
 
-    fvg_text = "\n".join([
-        f"  {f['type'].upper()} FVG: {f['low']:.2f}–{f['high']:.2f} (mid={f['midpoint']:.2f}) filled={f['filled']}"
-        for f in fvgs
-    ]) or "  Tidak ada FVG terdeteksi"
+    # Cek fakeout OB sweep
+    fakeout_msg = ""
+    if ob_sweep and ob_sweep.get("fakeout"):
+        fakeout_msg = f"\n⚠️ FAKEOUT ALERT: {ob_sweep.get('message','')}"
 
-    prompt = f"""Kamu adalah AI-1, spesialis struktur M15. Analisis singkat dan presisi.
+    # Watchlist: pasang di level IDM M15 jika ada
+    watchlist = []
+    idm_level = 0
 
-DATA M15:
-Bias saat ini: {bias.get('direction','?')} — {bias.get('reason','')}
-Swing High: {bias.get('last_swing_high', 0):.2f} | Swing Low: {bias.get('last_swing_low', 0):.2f}
+    if idm_m15 and not (ob_sweep and ob_sweep.get("fakeout")):
+        idm_level = idm_m15.get("level", 0)
+        idm_type  = idm_m15.get("type", "")
+        if idm_level > 0:
+            watchlist.append({
+                "level": idm_level,
+                "condition": "touch",
+                "reason": f"IDM M15 {idm_type} — sentuh untuk serahkan ke AI-2",
+                "for_ai": "AI-1-IDM-TOUCHED",
+                "phase": "waiting_idm_touch",
+            })
 
-ORDER BLOCKS:
-{ob_text}
+    # Jika fakeout — pasang watchlist konfirmasi OB break
+    elif ob_sweep and ob_sweep.get("fakeout"):
+        ob_lvl = ob_sweep.get("ob_level", 0)
+        if bias == "bullish":
+            watchlist.append({
+                "level": ob_lvl,
+                "condition": "break_below",
+                "reason": f"Konfirmasi OB break — close M15 di bawah {ob_lvl:.2f} = bearish valid",
+                "for_ai": "AI-1",
+                "phase": "waiting_ob_confirm",
+            })
+        else:
+            watchlist.append({
+                "level": ob_lvl,
+                "condition": "break_above",
+                "reason": f"Konfirmasi OB break — close M15 di atas {ob_lvl:.2f} = bullish valid",
+                "for_ai": "AI-1",
+                "phase": "waiting_ob_confirm",
+            })
 
-FAIR VALUE GAPS:
-{fvg_text}
+    # Narasi singkat untuk chat grup
+    if ob_sweep and ob_sweep.get("fakeout"):
+        chat_msg = f"Hiura: ada BOS {bias} M15 di {bos_level:.2f}, tapi OB ke-sweep — kemungkinan fakeout. Tunggu konfirmasi close dulu.{fakeout_msg}"
+    elif idm_level > 0:
+        chat_msg = f"Hiura: BOS {bias} M15 terkonfirmasi di {bos_level:.2f}. IDM M15 di {idm_level:.2f} — pantau level ini."
+    else:
+        chat_msg = f"Hiura: BOS {bias} M15 di {bos_level:.2f}, tapi IDM M15 belum terbentuk. Pantau dulu."
 
-LIQUIDITY: High={liq.get('recent_high',0):.2f} | Low={liq.get('recent_low',0):.2f}
-Harga saat ini: {current_price:.2f}
+    logger.info(f"[AI-1] BOS={bos_type} @ {bos_level:.2f} | IDM={idm_level:.2f} | "
+                f"fakeout={ob_sweep.get('fakeout') if ob_sweep else False} | watchlist={len(watchlist)}")
 
-TUGASMU:
-1. Konfirmasi bias M15 (bullish/bearish/neutral) dengan alasan 1 kalimat
-2. Tentukan 2-3 level M15 yang HARUS dipantau sebagai trigger (gunakan angka PERSIS dari data)
-   - Untuk bullish: OB low atau FVG low yang belum terisi sebagai area support
-   - Untuk bearish: OB high atau FVG high yang belum terisi sebagai area resistance
-
-WAJIB: balas HANYA JSON murni, langsung dari {{ :
-{{
-  "bias": "bullish|bearish|neutral",
-  "reason": "1 kalimat alasan bias",
-  "chat_msg": "pesan singkat ke grup (1-2 kalimat, gaya WA)",
-  "watchlist": [
-    {{"level": 71787.45, "condition": "touch|break_above|break_below", "reason": "OB bullish low M15", "for_ai": "AI-2"}}
-  ]
-}}"""
-
-    raw = _call(client, model, prompt, max_tokens=350)
-    parsed = _parse_json(raw)
-    if not parsed:
-        logger.warning(f"[AI-1] Gagal parse response: {raw[:100]}")
-        return {"bias": "neutral", "reason": "parse error", "chat_msg": "", "watchlist": []}
-
-    logger.info(f"[AI-1] bias={parsed.get('bias')} | {len(parsed.get('watchlist',[]))} level set")
-    return parsed
+    return {
+        "bias": bias,
+        "bos_found": True,
+        "bos_type": bos_type,
+        "bos_level": bos_level,
+        "idm_m15_level": idm_level,
+        "reason": f"BOS {bias} M15 @ {bos_level:.2f}",
+        "chat_msg": chat_msg,
+        "watchlist": watchlist,
+        "fakeout_detected": bool(ob_sweep and ob_sweep.get("fakeout")),
+    }
 
 
 # ══════════════════════════════════════════════════════════
-# AI-2: IDM HUNTER
-# Tugas: cari IDM terbaru di M1 sesuai bias M15
-# Output: level IDM yang harus disentuh + notif watchlist
-# Token: ringan — hanya data M1 ringkas + IDM hasil Python
+# AI-2: IDM HUNTER (M1)
+# Dipanggil setelah IDM M15 disentuh & swing range sudah ditandai AI-1
+# BOS bullish M15 → cari IDM BEARISH di M1 (retrace turun dalam range SH-SL)
+# BOS bearish M15 → cari IDM BULLISH di M1 (retrace naik dalam range SH-SL)
+# Token: sangat ringan — Python sudah hitung IDM, AI hanya narasi + fallback
 # ══════════════════════════════════════════════════════════
 
-def ai2_idm_hunter(client: Groq, model: str, ict_data: dict, idm_result: dict | None,
-                   bias: str, current_price: float) -> dict:
+def ai2_idm_hunter(client: Groq, model: str, ict_data: dict, idm_m1: dict | None,
+                   swing_range: dict, current_price: float) -> dict:
     """
-    AI-2 cari dan konfirmasi IDM di M1.
-    Return: {"idm_level": float, "direction": str, "chat_msg": str, "watchlist": [...]}
+    AI-2 set watchlist IDM M1 dalam range SH-SL dari AI-1.
+    idm_m1: hasil Python find_idm_in_range() — sudah presisi
+    swing_range: {"swing_high", "swing_low", "m1_idm_direction", "range_valid"}
     """
-    m1_fvgs = ict_data.get("m1_fvg", [])[:2]
-    fvg_text = "\n".join([
-        f"  {f['type'].upper()} FVG M1: {f['low']:.2f}–{f['high']:.2f} filled={f['filled']}"
-        for f in m1_fvgs
-    ]) or "  Tidak ada FVG M1"
+    sh  = swing_range.get("swing_high", 0)
+    sl  = swing_range.get("swing_low", 0)
+    m1_dir = swing_range.get("m1_idm_direction", "bearish")
+    range_valid = swing_range.get("range_valid", False)
+    watchlist = []
 
-    idm_text = "Tidak ada IDM terdeteksi oleh sistem"
-    if idm_result:
-        idm_text = (
-            f"IDM {idm_result['type']} ditemukan\n"
-            f"  Level (high/low candle A): {idm_result['level']:.2f}\n"
-            f"  Candle A time: {idm_result.get('candle_a_time','')}\n"
-            f"  Tembus time: {idm_result.get('tembus_time','')}"
+    if idm_m1 and range_valid:
+        idm_level = idm_m1.get("level", 0)
+        idm_type  = idm_m1.get("type", "")
+
+        # IDM bearish M1 (BOS bullish M15): harga retrace turun sentuh level ini
+        # IDM bullish M1 (BOS bearish M15): harga retrace naik sentuh level ini
+        watchlist.append({
+            "level": idm_level,
+            "condition": "touch",
+            "reason": f"IDM {idm_type} M1 @ {idm_level:.2f} dalam range {sl:.2f}–{sh:.2f}",
+            "for_ai": "AI-3",
+            "phase": "waiting_idm_m1_touch",
+        })
+        chat_msg = (
+            f"Senanan: IDM {m1_dir} M1 ketemu di {idm_level:.2f} "
+            f"(range {sl:.2f}–{sh:.2f}). Pantau level ini."
         )
+        logger.info(f"[AI-2] IDM M1 {m1_dir} @ {idm_level:.2f} | range {sl:.2f}–{sh:.2f}")
+        return {
+            "idm_valid": True,
+            "idm_level": idm_level,
+            "idm_direction": m1_dir,
+            "chat_msg": chat_msg,
+            "watchlist": watchlist,
+        }
 
-    prompt = f"""Kamu adalah AI-2, spesialis IDM (Inducement) di M1. Singkat dan presisi.
+    # IDM M1 belum terbentuk dalam range — minta AI konfirmasi swing
+    # dan set watchlist sementara di SL/SH range sebagai level pantau
+    if range_valid:
+        # Pantau batas range: kalau break SL (bullish) atau SH (bearish) = invalidasi
+        if m1_dir == "bearish":
+            # BOS bullish M15 — kalau SL (swing_low) break ke bawah = invalidasi
+            watchlist.append({
+                "level": sl,
+                "condition": "break_below",
+                "reason": f"Batas bawah range — break SL {sl:.2f} = invalidasi BOS bullish M15",
+                "for_ai": "AI-1",
+                "phase": "waiting_idm_m1_touch",
+            })
+        else:
+            watchlist.append({
+                "level": sh,
+                "condition": "break_above",
+                "reason": f"Batas atas range — break SH {sh:.2f} = invalidasi BOS bearish M15",
+                "for_ai": "AI-1",
+                "phase": "waiting_idm_m1_touch",
+            })
+        chat_msg = (
+            f"Senanan: IDM {m1_dir} M1 belum terbentuk di range {sl:.2f}–{sh:.2f}. "
+            f"Pantau batas range dulu."
+        )
+        logger.info(f"[AI-2] IDM M1 belum ada | range {sl:.2f}–{sh:.2f} | pantau batas")
+    else:
+        chat_msg = "Senanan: range dari AI-1 belum valid, tunggu IDM M15 disentuh dulu."
+        logger.warning("[AI-2] swing_range tidak valid")
 
-BIAS M15: {bias}
-HARGA SAAT INI: {current_price:.2f}
-
-IDM TERDETEKSI SISTEM:
-{idm_text}
-
-FVG M1:
-{fvg_text}
-
-TUGASMU:
-{"IDM sudah terdeteksi sistem. Konfirmasi level IDM ini valid untuk bias " + bias + ". Set watchlist: untuk bullish IDM → notif saat harga TURUN ke level IDM (touch/break_below). Untuk bearish IDM → notif saat harga NAIK ke level IDM (touch/break_above)." if idm_result else "IDM belum terdeteksi. Set watchlist di swing high/low M1 terdekat sebagai level pantauan IDM potensial."}
-
-WAJIB: balas HANYA JSON murni:
-{{
-  "idm_valid": true,
-  "idm_level": {idm_result['level'] if idm_result else 0},
-  "idm_direction": "{bias}",
-  "chat_msg": "pesan singkat ke grup (1-2 kalimat, gaya WA)",
-  "watchlist": [
-    {{"level": 0.0, "condition": "touch|break_above|break_below", "reason": "IDM level M1", "for_ai": "AI-3"}}
-  ]
-}}"""
-
-    raw = _call(client, model, prompt, max_tokens=300)
-    parsed = _parse_json(raw)
-    if not parsed:
-        logger.warning(f"[AI-2] Gagal parse: {raw[:100]}")
-        # Fallback: gunakan IDM dari Python analyzer
-        if idm_result:
-            cond = "touch" if bias == "bullish" else "touch"
-            return {
-                "idm_valid": True,
-                "idm_level": idm_result["level"],
-                "idm_direction": bias,
-                "chat_msg": f"IDM {idm_result['type']} di {idm_result['level']:.2f} — pantau level ini.",
-                "watchlist": [{
-                    "level": idm_result["level"],
-                    "condition": "touch",
-                    "reason": f"IDM {idm_result['type']} level",
-                    "for_ai": "AI-3"
-                }]
-            }
-        return {"idm_valid": False, "idm_level": 0, "chat_msg": "", "watchlist": []}
-
-    logger.info(f"[AI-2] IDM level={parsed.get('idm_level')} | valid={parsed.get('idm_valid')}")
-    return parsed
+    return {
+        "idm_valid": False,
+        "idm_level": 0,
+        "idm_direction": m1_dir,
+        "chat_msg": chat_msg,
+        "watchlist": watchlist,
+    }
 
 
 # ══════════════════════════════════════════════════════════
