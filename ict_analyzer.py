@@ -618,41 +618,61 @@ class ICTAnalyzer:
 
     def find_idm_after_bos(self, candles: list, bos: dict) -> dict | None:
         """
-        Cari IDM M15 yang relevan setelah BOS terbentuk.
+        Cari IDM M15 yang harus disentuh SETELAH BOS terbentuk (untuk retrace).
 
-        BOS bullish → cari IDM bullish M15 (swing high yang di-induce) SETELAH BOS.
-          Level IDM = high candle A yang harus disentuh saat retrace.
+        Logika:
+        - BOS bullish M15 sudah terjadi → harga akan retrace turun
+        - Untuk retrace, harga harus menyentuh IDM bullish M15 yang ada
+        - IDM bullish = candle A buat swing high → gap (tidak tembus) → tembus
+        - Yang dipantau = LOW candle A (bukan high) — karena saat retrace,
+          harga akan turun dan low candle A adalah level IDM yang harus disentuh
 
-        BOS bearish → cari IDM bearish M15 (swing low yang di-induce) SETELAH BOS.
-          Level IDM = low candle A yang harus disentuh saat retrace.
+        Dengan kata lain:
+        - BOS bullish → cari IDM bullish M15 SETELAH BOS → pantau LOW candle A
+        - BOS bearish → cari IDM bearish M15 SETELAH BOS → pantau HIGH candle A
         """
         if not bos:
             return None
 
-        bos_idx = bos.get("bos_candle_idx", 0)
         bos_type = bos.get("type", "")
+        bos_idx  = bos.get("bos_candle_idx", 0)
         lookback = candles[-40:]
 
-        # Candle setelah BOS
+        # Candle setelah BOS terbentuk
         post_bos = lookback[bos_idx:]
         if len(post_bos) < 3:
             return None
 
         if bos_type == "bullish_bos":
-            # Cari IDM bullish setelah BOS: swing high → gap → tembus
+            # Cari IDM bullish setelah BOS (swing high → gap → tembus high)
             idms = self.find_idm(post_bos, direction="bullish")
             if idms:
                 idm = idms[-1]
-                idm["context"] = "m15_after_bullish_bos"
-                idm["watch_condition"] = "touch"  # harga turun sentuh level IDM ini
+                # Yang dipantau: LOW candle A (bukan high)
+                # Saat retrace dari bullish, harga turun ke low candle A
+                watch_level = idm.get("candle_a_low", idm["level"])
+                idm["watch_level"] = round(watch_level, 2)  # low candle A
+                idm["watch_condition"] = "touch"
+                idm["context"] = "m15_bullish_bos_retrace"
+                idm["description"] = (
+                    f"IDM bullish M15: low candle A @ {watch_level:.2f} "
+                    f"(high={idm['level']:.2f}) — retrace harus sentuh low ini"
+                )
                 return idm
 
         elif bos_type == "bearish_bos":
+            # IDM bearish setelah BOS → pantau HIGH candle A
             idms = self.find_idm(post_bos, direction="bearish")
             if idms:
                 idm = idms[-1]
-                idm["context"] = "m15_after_bearish_bos"
+                watch_level = idm.get("candle_a_high", idm["level"])
+                idm["watch_level"] = round(watch_level, 2)  # high candle A
                 idm["watch_condition"] = "touch"
+                idm["context"] = "m15_bearish_bos_retrace"
+                idm["description"] = (
+                    f"IDM bearish M15: high candle A @ {watch_level:.2f} "
+                    f"(low={idm['level']:.2f}) — retrace harus sentuh high ini"
+                )
                 return idm
 
         return None

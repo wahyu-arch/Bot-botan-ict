@@ -118,13 +118,15 @@ def ai1_m15_analysis(client: Groq, model: str, ict_data: dict, current_price: fl
     idm_level = 0
 
     if idm_m15 and not (ob_sweep and ob_sweep.get("fakeout")):
-        idm_level = idm_m15.get("level", 0)
+        # watch_level = low candle A (BOS bullish) atau high candle A (BOS bearish)
+        idm_level = idm_m15.get("watch_level", idm_m15.get("level", 0))
         idm_type  = idm_m15.get("type", "")
+        desc      = idm_m15.get("description", f"IDM M15 {idm_type} @ {idm_level:.2f}")
         if idm_level > 0:
             watchlist.append({
                 "level": idm_level,
                 "condition": "touch",
-                "reason": f"IDM M15 {idm_type} — sentuh untuk serahkan ke AI-2",
+                "reason": desc,
                 "for_ai": "AI-1-IDM-TOUCHED",
                 "phase": "waiting_idm_touch",
             })
@@ -153,7 +155,7 @@ def ai1_m15_analysis(client: Groq, model: str, ict_data: dict, current_price: fl
     if ob_sweep and ob_sweep.get("fakeout"):
         chat_msg = f"Hiura: ada BOS {bias} M15 di {bos_level:.2f}, tapi OB ke-sweep — kemungkinan fakeout. Tunggu konfirmasi close dulu.{fakeout_msg}"
     elif idm_level > 0:
-        chat_msg = f"Hiura: BOS {bias} M15 terkonfirmasi di {bos_level:.2f}. IDM M15 di {idm_level:.2f} — pantau level ini."
+        chat_msg = f"Hiura: BOS {bias} M15 terkonfirmasi di {bos_level:.2f}. Pantau low IDM M15 @ {idm_level:.2f} — retrace harus sentuh sini."
     else:
         chat_msg = f"Hiura: BOS {bias} M15 di {bos_level:.2f}, tapi IDM M15 belum terbentuk. Pantau dulu."
 

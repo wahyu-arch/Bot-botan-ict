@@ -1227,7 +1227,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 self.watchlist.add_many(wl, session_id)
                 self._phase = "idm_m15_wait"  # Tunggu IDM M15 disentuh
                 logger.info(f"[AI-1] BOS {self._current_bias} | IDM M15 @ "
-                           f"{self._idm_m15.get('level',0):.2f} | Fase → idm_m15_wait")
+                           f"{self._idm_m15.get('watch_level', self._idm_m15.get('level',0)):.2f} (low candle A) | Fase → idm_m15_wait")
             elif out.get("fakeout_detected"):
                 # Pasang watchlist konfirmasi OB break
                 if wl:
@@ -1239,7 +1239,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
         # ── FASE 1b: TUNGGU IDM M15 DISENTUH (AI-1 masih jaga) ──
         elif phase == "idm_m15_wait":
-            idm_level = self._idm_m15.get("level", 0)
+            idm_level = self._idm_m15.get("watch_level", self._idm_m15.get("level", 0))
             idm_type  = self._idm_m15.get("type", "")
 
             # Cek apakah IDM M15 sudah disentuh (wick atau body)
@@ -1532,38 +1532,38 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 # ── SCAN HARGA & TRIGGER ──────────────────────────
                 triggered = self.watchlist.check(current_price, self._prev_price)
 
+                def _run_safe(triggered_item=None):
+                    try:
+                        self._run_specialist_cycle(market_context, triggered_item)
+                    except Exception as e:
+                        err = str(e)
+                        if "429" in err or "rate_limit" in err.lower() or "413" in err:
+                            logger.warning(f"[RATE LIMIT] Specialist: {err[:100]}")
+                        else:
+                            logger.error(f"[ERROR] Specialist: {err[:150]}")
+
                 if triggered:
+                    # Ada watchlist yang disentuh — jalankan fase berikutnya
                     for item in triggered:
                         logger.info(
                             f"[TRIGGER] 🔔 {item['condition'].upper()} @ {item['level']:.2f} | "
                             f"for={item.get('for_ai','?')} | {item['reason']}"
                         )
-                    logger.info(f"[SPECIALIST] {len(triggered)} trigger — jalankan fase {self._phase}")
+                    logger.info(f"[SPECIALIST] {len(triggered)} trigger → fase {self._phase}")
+                    _run_safe(triggered[-1])
 
-                    try:
-                        self._run_specialist_cycle(market_context, triggered[-1])
-                        self._initial_analysis_done = True
-                    except Exception as e:
-                        err = str(e)
-                        if "429" in err or "rate_limit" in err.lower() or "413" in err:
-                            logger.warning(f"[RATE LIMIT] Specialist cycle kena limit: {err[:100]}")
-                        else:
-                            logger.error(f"[ERROR] Specialist cycle: {err[:150]}")
+                elif self._phase == "m15_scan":
+                    # Fase scan: jalankan SETIAP siklus (BOS bisa terjadi kapan saja)
+                    # Tidak perlu trigger — langsung cek BOS via Python, panggil AI-1
+                    _run_safe()
 
-                elif not self._initial_analysis_done:
-                    # Startup — langsung jalankan AI-1 M15 scan
-                    logger.info(f"[SPECIALIST] Startup — jalankan AI-1 M15 scan")
-                    try:
-                        self._run_specialist_cycle(market_context)
-                        self._initial_analysis_done = True
-                    except Exception as e:
-                        err = str(e)
-                        if "429" in err or "413" in err or "rate_limit" in err.lower():
-                            logger.warning(f"[RATE LIMIT] Startup scan: {err[:100]}")
-                        else:
-                            logger.error(f"[ERROR] Startup scan: {err[:150]}")
+                elif self._phase in ("idm_m15_wait",):
+                    # Fase tunggu IDM M15: Python cek setiap siklus tanpa token
+                    # _run_specialist_cycle akan handle cek ini tanpa panggil AI
+                    _run_safe()
+
                 else:
-                    # Tidak ada trigger — log harga saja, 0 token
+                    # Fase lain (idm_hunt, bos_guard, entry_sniper) — tunggu trigger
                     active = self.watchlist.get_active()
                     logger.info(
                         f"[BOT] 💰 {current_price:.2f} | "
