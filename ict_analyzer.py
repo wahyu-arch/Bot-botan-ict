@@ -17,17 +17,17 @@ class ICTAnalyzer:
 
     def quick_check(self, market_context: dict) -> dict:
         """Analisis cepat ICT dari data market yang sudah disiapkan."""
-        m15 = market_context.get("m15", {})
-        m1 = market_context.get("m1", {})
+        h1 = market_context.get("h1", {})
+        m5 = market_context.get("m5", {})
 
         result = {
-            "m15_bias": self._detect_bias(m15.get("candles", [])),
-            "m15_ob": self._find_order_blocks(m15.get("candles", [])),
-            "m15_fvg": self._find_fvg(m15.get("candles", [])),
-            "m15_bos": self._detect_bos(m15.get("candles", [])),
-            "m1_mss": self._detect_mss(m1.get("candles", [])),
-            "m1_fvg": self._find_fvg(m1.get("candles", [])),
-            "liquidity_pools": self._identify_liquidity(m15.get("candles", [])),
+            "h1_bias": self._detect_bias(h1.get("candles", [])),
+            "h1_ob": self._find_order_blocks(h1.get("candles", [])),
+            "h1_fvg": self._find_fvg(h1.get("candles", [])),
+            "h1_bos": self._detect_bos(h1.get("candles", [])),
+            "m5_mss": self._detect_mss(m5.get("candles", [])),
+            "m5_fvg": self._find_fvg(m5.get("candles", [])),
+            "liquidity_pools": self._identify_liquidity(h1.get("candles", [])),
         }
 
         logger.debug(f"ICT Analysis: {result}")
@@ -35,7 +35,7 @@ class ICTAnalyzer:
 
     def _detect_bias(self, candles: list) -> dict:
         """
-        Tentukan bias M15 berdasarkan struktur swing.
+        Tentukan bias H1 berdasarkan struktur swing.
         HH + HL = bullish, LH + LL = bearish
         """
         if len(candles) < 10:
@@ -259,7 +259,7 @@ class ICTAnalyzer:
 
     def _detect_mss(self, candles: list) -> Optional[dict]:
         """
-        Market Structure Shift (MSS) di M1.
+        Market Structure Shift (MSS) di M5.
         Reversal dari trend sebelumnya - sinyal entry potensial.
         """
         if len(candles) < 10:
@@ -289,21 +289,21 @@ class ICTAnalyzer:
                 "timestamp": last.get("timestamp", ""),
             }
 
-        # Alternative MSS: BOS di M1
-        m1_high = max(c["high"] for c in lookback[-5:-1])
-        m1_low = min(c["low"] for c in lookback[-5:-1])
+        # Alternative MSS: BOS di M5
+        m5_high = max(c["high"] for c in lookback[-5:-1])
+        m5_low = min(c["low"] for c in lookback[-5:-1])
 
-        if last["close"] > m1_high:
+        if last["close"] > m5_high:
             return {
                 "type": "bullish_mss_bos",
-                "level": m1_high,
+                "level": m5_high,
                 "close": last["close"],
                 "timestamp": last.get("timestamp", ""),
             }
-        elif last["close"] < m1_low:
+        elif last["close"] < m5_low:
             return {
                 "type": "bearish_mss_bos",
-                "level": m1_low,
+                "level": m5_low,
                 "close": last["close"],
                 "timestamp": last.get("timestamp", ""),
             }
@@ -340,42 +340,39 @@ class ICTAnalyzer:
     #   High candle A itulah level IDM yang harus disentuh untuk konfirmasi
     # ─────────────────────────────────────────────────────
 
-    def find_idm(self, candles: list, direction: str = "bullish") -> list:
+    def find_idm(self, candles: list, direction: str = "bullish",
+                 gap_min: int = 1, max_search: int = 10) -> list:
         """
         Cari semua IDM (Inducement) pada candle list.
         direction: 'bullish' atau 'bearish'
-        Return: list of IDM dict, terbaru di belakang
+        gap_min: minimum candle kosong (dari rules)
+        max_search: max candle yang dicari setelah A (dari rules)
         """
         idms = []
         if len(candles) < 4:
             return idms
 
         if direction == "bullish":
-            # Cari swing high (candle A) yang jadi IDM bullish
             for i in range(1, len(candles) - 2):
                 candle_a = candles[i]
                 high_a = candle_a["high"]
 
-                # Candle A harus lebih tinggi dari sebelum dan sesudahnya (swing high)
                 if candle_a["high"] <= candles[i-1]["high"]:
                     continue
 
-                # Cari minimal 1 candle kosong setelah A (tidak tembus high A sama sekali)
-                gap_found = False
+                gap_count = 0
                 tembus_idx = None
 
-                for j in range(i+1, min(i+10, len(candles))):
+                for j in range(i+1, min(i+max_search, len(candles))):
                     c = candles[j]
                     if c["high"] >= high_a:
-                        # Candle ini tembus — cek apakah ada gap sebelumnya
-                        if gap_found:
+                        if gap_count >= gap_min:
                             tembus_idx = j
                         break
                     else:
-                        # Candle ini tidak tembus — bisa jadi "kosong"
-                        gap_found = True
+                        gap_count += 1
 
-                if tembus_idx and gap_found:
+                if tembus_idx and gap_count >= gap_min:
                     idms.append({
                         "type": "bullish_idm",
                         "level": round(high_a, 2),        # Harga IDM = high candle A (presisi)
@@ -398,19 +395,19 @@ class ICTAnalyzer:
                 if candle_a["low"] >= candles[i-1]["low"]:
                     continue
 
-                gap_found = False
+                gap_count = 0
                 tembus_idx = None
 
-                for j in range(i+1, min(i+10, len(candles))):
+                for j in range(i+1, min(i+max_search, len(candles))):
                     c = candles[j]
                     if c["low"] <= low_a:
-                        if gap_found:
+                        if gap_count >= gap_min:
                             tembus_idx = j
                         break
                     else:
-                        gap_found = True
+                        gap_count += 1
 
-                if tembus_idx and gap_found:
+                if tembus_idx and gap_count >= gap_min:
                     idms.append({
                         "type": "bearish_idm",
                         "level": round(low_a, 2),
@@ -427,9 +424,10 @@ class ICTAnalyzer:
         # Kembalikan IDM terbaru (berdasarkan candle_a_idx terbesar)
         return sorted(idms, key=lambda x: x["candle_a_idx"])
 
-    def get_latest_idm(self, candles: list, direction: str = "bullish") -> dict | None:
+    def get_latest_idm(self, candles: list, direction: str = "bullish",
+                         gap_min: int = 1, max_search: int = 10) -> dict | None:
         """Ambil IDM terbaru saja."""
-        idms = self.find_idm(candles, direction)
+        idms = self.find_idm(candles, direction, gap_min=gap_min, max_search=max_search)
         return idms[-1] if idms else None
 
     def msnr_level(self, candles: list, direction: str = "support") -> list:
@@ -481,9 +479,9 @@ class ICTAnalyzer:
 
         return levels
 
-    def check_bos_m1(self, candles: list, direction: str = "bullish", idm_level: float = 0) -> dict | None:
+    def check_bos_m5(self, candles: list, direction: str = "bullish", idm_level: float = 0) -> dict | None:
         """
-        Cek BOS di M1 setelah IDM tersentuh.
+        Cek BOS di M5 setelah IDM tersentuh.
         BOS bullish: setelah IDM bullish disentuh, harga close di atas swing high terakhir
         BOS bearish: setelah IDM bearish disentuh, harga close di bawah swing low terakhir
         """
@@ -507,7 +505,7 @@ class ICTAnalyzer:
 
             if last_candle["close"] > last_sh:
                 return {
-                    "type": "bullish_bos_m1",
+                    "type": "bullish_bos_m5",
                     "level": round(last_sh, 2),
                     "close": round(last_candle["close"], 2),
                     "timestamp": last_candle.get("timestamp", ""),
@@ -527,7 +525,7 @@ class ICTAnalyzer:
 
             if last_candle["close"] < last_sl:
                 return {
-                    "type": "bearish_bos_m1",
+                    "type": "bearish_bos_m5",
                     "level": round(last_sl, 2),
                     "close": round(last_candle["close"], 2),
                     "timestamp": last_candle.get("timestamp", ""),
@@ -536,12 +534,12 @@ class ICTAnalyzer:
         return None
 
     # ─────────────────────────────────────────────────────
-    # AI-1 Logic: BOS M15 → IDM M15 → Swing High/Low
+    # AI-1 Logic: BOS H1 → IDM H1 → Swing High/Low
     # ─────────────────────────────────────────────────────
 
-    def find_bos_m15(self, candles: list) -> dict | None:
+    def find_bos_h1(self, candles: list, lookback: int = 40, swing_min: int = 1) -> dict | None:
         """
-        Deteksi BOS M15 terbaru.
+        Deteksi BOS H1 terbaru.
         BOS bullish: close candle melewati swing high sebelumnya
         BOS bearish: close candle melewati swing low sebelumnya
         Return dict dengan type, level, bos_candle_idx, dan swing_high/low sebelum BOS.
@@ -549,7 +547,7 @@ class ICTAnalyzer:
         if len(candles) < 10:
             return None
 
-        lookback = candles[-40:]
+        lookback = candles[-lookback:]
         n = len(lookback)
 
         # Kumpulkan swing highs dan lows
@@ -573,7 +571,7 @@ class ICTAnalyzer:
             if prev_highs:
                 last_sh_idx, last_sh = prev_highs[-1]
                 if c["close"] > last_sh:
-                    # Cari swing low sebelum BOS (untuk IDM M15 bullish)
+                    # Cari swing low sebelum BOS (untuk IDM H1 bullish)
                     prev_lows = [(idx, p) for idx, p in swing_lows if idx < last_sh_idx]
                     last_sl = prev_lows[-1][1] if prev_lows else lookback[0]["low"]
 
@@ -589,7 +587,7 @@ class ICTAnalyzer:
                         "bos_time": c.get("timestamp", ""),
                         "sh_since_bos": round(sh_since_bos, 2),  # SH tertinggi sejak BOS
                         "sl_before_bos": round(last_sl, 2),      # SL sebelum BOS
-                        # IDM M15 yang harus disentuh = IDM bullish M15 (high candle A)
+                        # IDM H1 yang harus disentuh = IDM bullish H1 (high candle A)
                         # dicari terpisah via find_idm_after_bos()
                     }
 
@@ -616,20 +614,21 @@ class ICTAnalyzer:
 
         return None
 
-    def find_idm_after_bos(self, candles: list, bos: dict) -> dict | None:
+    def find_idm_after_bos(self, candles: list, bos: dict,
+                            gap_min: int = 1, max_search: int = 10) -> dict | None:
         """
-        Cari IDM M15 yang harus disentuh SETELAH BOS terbentuk (untuk retrace).
+        Cari IDM H1 yang harus disentuh SETELAH BOS terbentuk (untuk retrace).
 
         Logika:
-        - BOS bullish M15 sudah terjadi → harga akan retrace turun
-        - Untuk retrace, harga harus menyentuh IDM bullish M15 yang ada
+        - BOS bullish H1 sudah terjadi → harga akan retrace turun
+        - Untuk retrace, harga harus menyentuh IDM bullish H1 yang ada
         - IDM bullish = candle A buat swing high → gap (tidak tembus) → tembus
         - Yang dipantau = LOW candle A (bukan high) — karena saat retrace,
           harga akan turun dan low candle A adalah level IDM yang harus disentuh
 
         Dengan kata lain:
-        - BOS bullish → cari IDM bullish M15 SETELAH BOS → pantau LOW candle A
-        - BOS bearish → cari IDM bearish M15 SETELAH BOS → pantau HIGH candle A
+        - BOS bullish → cari IDM bullish H1 SETELAH BOS → pantau LOW candle A
+        - BOS bearish → cari IDM bearish H1 SETELAH BOS → pantau HIGH candle A
         """
         if not bos:
             return None
@@ -645,7 +644,7 @@ class ICTAnalyzer:
 
         if bos_type == "bullish_bos":
             # Cari IDM bullish setelah BOS (swing high → gap → tembus high)
-            idms = self.find_idm(post_bos, direction="bullish")
+            idms = self.find_idm(post_bos, direction="bullish", gap_min=gap_min, max_search=max_search)
             if idms:
                 idm = idms[-1]
                 # Yang dipantau: LOW candle A (bukan high)
@@ -653,24 +652,24 @@ class ICTAnalyzer:
                 watch_level = idm.get("candle_a_low", idm["level"])
                 idm["watch_level"] = round(watch_level, 2)  # low candle A
                 idm["watch_condition"] = "touch"
-                idm["context"] = "m15_bullish_bos_retrace"
+                idm["context"] = "h1_bullish_bos_retrace"
                 idm["description"] = (
-                    f"IDM bullish M15: low candle A @ {watch_level:.2f} "
+                    f"IDM bullish H1: low candle A @ {watch_level:.2f} "
                     f"(high={idm['level']:.2f}) — retrace harus sentuh low ini"
                 )
                 return idm
 
         elif bos_type == "bearish_bos":
             # IDM bearish setelah BOS → pantau HIGH candle A
-            idms = self.find_idm(post_bos, direction="bearish")
+            idms = self.find_idm(post_bos, direction="bearish", gap_min=gap_min, max_search=max_search)
             if idms:
                 idm = idms[-1]
                 watch_level = idm.get("candle_a_high", idm["level"])
                 idm["watch_level"] = round(watch_level, 2)  # high candle A
                 idm["watch_condition"] = "touch"
-                idm["context"] = "m15_bearish_bos_retrace"
+                idm["context"] = "h1_bearish_bos_retrace"
                 idm["description"] = (
-                    f"IDM bearish M15: high candle A @ {watch_level:.2f} "
+                    f"IDM bearish H1: high candle A @ {watch_level:.2f} "
                     f"(low={idm['level']:.2f}) — retrace harus sentuh high ini"
                 )
                 return idm
@@ -679,7 +678,7 @@ class ICTAnalyzer:
 
     def check_idm_touched(self, candles: list, idm_level: float, direction: str) -> dict | None:
         """
-        Cek apakah IDM M15 sudah disentuh (wick atau body boleh).
+        Cek apakah IDM H1 sudah disentuh (wick atau body boleh).
         direction: arah IDM ('bullish' → level adalah high, sentuh dari bawah ke atas lalu turun)
 
         Return: dict info candle yang menyentuh, atau None.
@@ -714,7 +713,7 @@ class ICTAnalyzer:
 
     def get_swing_range_after_idm_touch(self, candles: list, bos: dict, touch_info: dict) -> dict:
         """
-        Setelah IDM M15 disentuh, hitung range untuk AI-2 cari IDM di M1:
+        Setelah IDM H1 disentuh, hitung range untuk AI-2 cari IDM di M5:
 
         BOS bullish:
           SH = high tertinggi sejak BOS (sh_since_bos) — batas atas range
@@ -737,7 +736,7 @@ class ICTAnalyzer:
             return {
                 "swing_high": round(sh, 2),
                 "swing_low": round(sl, 2),
-                "m1_idm_direction": "bearish",
+                "m5_idm_direction": "bearish",
                 "range_valid": sh > sl > 0,
             }
         elif bos_type == "bearish_bos":
@@ -748,21 +747,21 @@ class ICTAnalyzer:
             return {
                 "swing_high": round(sh, 2),
                 "swing_low": round(sl, 2),
-                "m1_idm_direction": "bullish",
+                "m5_idm_direction": "bullish",
                 "range_valid": sh > sl > 0,
             }
-        return {"swing_high": 0, "swing_low": 0, "m1_idm_direction": "unknown", "range_valid": False}
+        return {"swing_high": 0, "swing_low": 0, "m5_idm_direction": "unknown", "range_valid": False}
 
     def check_ob_sweep_fakeout(self, candles: list, obs: list, bos_type: str) -> dict:
         """
         Cek apakah ada OB sweep yang berpotensi fakeout.
 
         BOS bullish: OB di bawah harga saat ini ke-sweep (wick tembus low OB)
-          → Fakeout kalau TIDAK ada close M15 di bawah OB low
-          → Konfirmasi bearish kalau ada close M15 di bawah OB low
+          → Fakeout kalau TIDAK ada close H1 di bawah OB low
+          → Konfirmasi bearish kalau ada close H1 di bawah OB low
 
         BOS bearish: OB di atas ke-sweep
-          → Fakeout kalau tidak ada close M15 di atas OB high
+          → Fakeout kalau tidak ada close H1 di atas OB high
         """
         if not candles or not obs:
             return {"sweep_detected": False}
@@ -807,10 +806,11 @@ class ICTAnalyzer:
         return result
 
     def find_idm_in_range(self, candles: list, direction: str,
-                          swing_high: float, swing_low: float) -> dict | None:
+                          swing_high: float, swing_low: float,
+                          gap_min: int = 1, max_search: int = 10) -> dict | None:
         """
-        Cari IDM di M1 dalam range SH-SL yang diberikan AI-1.
-        direction: 'bearish' (untuk BOS bullish M15) atau 'bullish' (untuk BOS bearish M15)
+        Cari IDM di M5 dalam range SH-SL yang diberikan AI-1.
+        direction: 'bearish' (untuk BOS bullish H1) atau 'bullish' (untuk BOS bearish H1)
 
         Filter: IDM harus berada di dalam range swing_low < level < swing_high
         """
@@ -822,7 +822,7 @@ class ICTAnalyzer:
         if len(relevant) < 4:
             relevant = candles  # fallback: gunakan semua jika tidak cukup
 
-        idms = self.find_idm(relevant, direction=direction)
+        idms = self.find_idm(relevant, direction=direction, gap_min=gap_min, max_search=max_search)
 
         # Filter: level IDM harus dalam range
         valid = [idm for idm in idms

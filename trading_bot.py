@@ -1,6 +1,6 @@
 """
 ICT Trading Bot dengan Groq AI + Memory Self-Iteration
-Strategi: M15 (market bias) + M1 (entry confirmation)
+Strategi: H1 (market bias) + M5 (entry confirmation)
 """
 
 import os
@@ -17,8 +17,9 @@ from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 from watchlist_engine import WatchlistEngine
+from rules_engine import RulesEngine
 from specialist_agents import (
-    ai1_m15_analysis, ai2_idm_hunter, ai3_bos_mss_guard,
+    ai1_h1_analysis, ai2_idm_hunter, ai3_bos_mss_guard,
     ai4_entry_sniper, loss_debrief
 )
 
@@ -81,8 +82,8 @@ def _parse_json_safe(raw: str) -> dict | list | None:
 class ICTTradingBot:
     """
     Bot trading dengan strategi ICT:
-    - M15: menentukan arah bias market (struktur, OB, FVG)
-    - M1: konfirmasi entry (MSS, FVG fill, rejection)
+    - H1: menentukan arah bias market (struktur, OB, FVG)
+    - M5: konfirmasi entry (MSS, FVG fill, rejection)
     - Groq AI: analisis + keputusan dengan memory self-iteration
     """
 
@@ -150,17 +151,18 @@ class ICTTradingBot:
         self.executor = TradeExecutor(paper_mode=self.paper_trading)
 
         self.watchlist = WatchlistEngine()
+        self.rules = RulesEngine()
         self._prev_price: float = 0.0
         self._initial_analysis_done: bool = False
 
         # State machine 4 AI spesialis
-        self._current_bias: str = "neutral"       # bias M15 saat ini
+        self._current_bias: str = "neutral"       # bias H1 saat ini
         self._current_idm_level: float = 0.0      # level IDM aktif
         self._current_bos_level: float = 0.0      # level BOS terkonfirmasi
-        self._phase: str = "m15_scan"             # fase saat ini
-        # Fase: m15_scan → idm_m15_wait → idm_hunt → bos_guard → entry_sniper
-        self._bos_m15: dict = {}                  # BOS M15 yang aktif
-        self._idm_m15: dict = {}                  # IDM M15 yang harus disentuh
+        self._phase: str = "h1_scan"             # fase saat ini
+        # Fase: h1_scan → idm_h1_wait → idm_hunt → bos_guard → entry_sniper
+        self._bos_h1: dict = {}                  # BOS H1 yang aktif
+        self._idm_h1: dict = {}                  # IDM H1 yang harus disentuh
         self._swing_range: dict = {}              # SH/SL range untuk AI-2
         self._ob_watch_level: float = 0.0         # OB level yang dipantau AI-1
 
@@ -188,7 +190,7 @@ class ICTTradingBot:
         return f"""Kamu adalah analis trading profesional menggunakan metodologi ICT (Inner Circle Trader).
 
 FRAMEWORK ANALISIS:
-1. M15 (MARKET BIAS):
+1. H1 (MARKET BIAS):
    - Identifikasi struktur market: Higher High (HH), Higher Low (HL) = bullish
    - Lower High (LH), Lower Low (LL) = bearish
    - Cari Order Block (OB): last candle opposite sebelum impulse move
@@ -196,21 +198,21 @@ FRAMEWORK ANALISIS:
    - Break of Structure (BOS): konfirmasi kelanjutan trend
    - Change of Character (CHoCH): potensi reversal
 
-2. M1 (KONFIRMASI ENTRY):
-   - Market Structure Shift (MSS): BOS di M1 searah bias M15
+2. M5 (KONFIRMASI ENTRY):
+   - Market Structure Shift (MSS): BOS di M5 searah bias H1
    - FVG fill: harga mengisi gap sebelum lanjut
-   - Rejection dari OB: pin bar / engulfing di OB M15
+   - Rejection dari OB: pin bar / engulfing di OB H1
    - Entry hanya saat ada konfluensi minimum 2 faktor
 
 3. MANAJEMEN RISIKO:
    - SL selalu di balik OB (di luar struktur)
    - TP minimal 2:1 RR, target ke liquidity pool berikutnya
-   - Jangan trading melawan bias M15
+   - Jangan trading melawan bias H1
    - Skip jika spread > 2 pip atau volatilitas sangat tinggi
 
 4. KONDISI NO TRADE:
    - Berita besar dalam 30 menit
-   - Ranging market tanpa struktur jelas di M15
+   - Ranging market tanpa struktur jelas di H1
    - OB sudah terlalu jauh dari harga saat ini (> 50 pip)
    - Sudah 2 loss berturut-turut hari ini
    - Funding rate sangat negatif/positif (>0.1%) melawan posisi
@@ -224,10 +226,10 @@ FRAMEWORK ANALISIS:
 
 RESPONSE FORMAT — WAJIB: balas HANYA dengan JSON murni, tanpa penjelasan, tanpa markdown, tanpa ```json, langsung mulai dari {{ hingga }}:
 {{
-  "bias_m15": "bullish|bearish|neutral",
-  "bias_reason": "penjelasan singkat struktur M15",
+  "bias_h1": "bullish|bearish|neutral",
+  "bias_reason": "penjelasan singkat struktur H1",
   "entry_signal": "buy|sell|none",
-  "entry_reason": "konfluensi yang terdeteksi di M1",
+  "entry_reason": "konfluensi yang terdeteksi di M5",
   "entry_price": 0.0,
   "stop_loss": 0.0,
   "take_profit": 0.0,
@@ -254,11 +256,11 @@ RESPONSE FORMAT — WAJIB: balas HANYA dengan JSON murni, tanpa penjelasan, tanp
         user_prompt = f"""
 Analisis kondisi market saat ini untuk {self.symbol}:
 
-=== DATA M15 (MARKET BIAS) ===
-{json.dumps(market_context['m15'], indent=2)}
+=== DATA H1 (MARKET BIAS) ===
+{json.dumps(market_context['h1'], indent=2)}
 
-=== DATA M1 (KONFIRMASI ENTRY) ===
-{json.dumps(market_context['m1'], indent=2)}
+=== DATA M5 (KONFIRMASI ENTRY) ===
+{json.dumps(market_context['m5'], indent=2)}
 
 === HARGA SAAT INI ===
 Bid: {market_context['current_price']['bid']}
@@ -493,7 +495,7 @@ Tulis HANYA pesanmu saja (plain text, bukan JSON)."""
             task_arka = (
                 "Ini Ronde 1. KAMU YANG PERTAMA BICARA di grup ini. "
                 "Berikan analisis ICT kamu tentang setup ini secara lengkap: "
-                "bias M15, zona entry ideal, timing, SL/TP plan, dan risiko utama. "
+                "bias H1, zona entry ideal, timing, SL/TP plan, dan risiko utama. "
                 "Gaya WA santai tapi tajam. Max 4-5 kalimat."
             )
             msg_arka = call_ai("AI-1", task_arka)
@@ -586,7 +588,7 @@ WAJIB: balas HANYA JSON murni (tanpa markdown, tanpa penjelasan), langsung dari 
   "consensus": "setuju_lanjut | hati_hati | skip_disarankan",
   "poin_sepakat": "hal-hal yang disepakati ketiga analis",
   "poin_debat": "hal-hal yang masih diperdebatkan",
-  "entry_ideal_zona": "zona/level harga entry terbaik berdasarkan diskusi (misal: OB M15 di 3245-3248, FVG fill di 3250)",
+  "entry_ideal_zona": "zona/level harga entry terbaik berdasarkan diskusi (misal: OB H1 di 3245-3248, FVG fill di 3250)",
   "entry_ideal_timing": "kapan tepatnya entry — kondisi candle/konfluensi yang harus ada sebelum eksekusi",
   "entry_plan_b": "alternatif entry jika harga skip zona ideal — di mana dan syaratnya apa",
   "risiko_utama": "risiko terbesar yang teridentifikasi dari diskusi",
@@ -630,7 +632,7 @@ SINYAL ICT:
 CONTEXT MARKET: Symbol {market_context.get('symbol','N/A')} | Harga: {json.dumps(market_context.get('current_price',{}))}
 
 Tulis analisis kamu mencakup:
-- Bias M15 dan alasannya
+- Bias H1 dan alasannya
 - Zona entry ideal (level konkret)
 - Timing entry (kondisi yang harus terpenuhi)
 - SL/TP plan
@@ -820,19 +822,19 @@ HARGA PRESISI (gunakan angka PERSIS ini, JANGAN dibulatkan):
 - Bid: {current.get('bid', 0):.2f}
 - Ask: {current.get('ask', 0):.2f}
 
-STRUKTUR M15 (gunakan nilai PERSIS dari data):
-- Bias: {ict_data.get('m15_bias', {}).get('direction', 'N/A')}
-- Swing High: {ict_data.get('m15_bias', {}).get('last_swing_high', 0):.2f}
-- Swing Low: {ict_data.get('m15_bias', {}).get('last_swing_low', 0):.2f}
+STRUKTUR H1 (gunakan nilai PERSIS dari data):
+- Bias: {ict_data.get('h1_bias', {}).get('direction', 'N/A')}
+- Swing High: {ict_data.get('h1_bias', {}).get('last_swing_high', 0):.2f}
+- Swing Low: {ict_data.get('h1_bias', {}).get('last_swing_low', 0):.2f}
 
-ORDER BLOCKS M15:
-{chr(10).join([f"  {ob['type'].upper()} OB: High={ob['high']:.2f} Low={ob['low']:.2f}" for ob in ict_data.get('m15_ob', [])[:4]])}
+ORDER BLOCKS H1:
+{chr(10).join([f"  {ob['type'].upper()} OB: High={ob['high']:.2f} Low={ob['low']:.2f}" for ob in ict_data.get('h1_ob', [])[:4]])}
 
-FVG M15:
-{chr(10).join([f"  {fvg['type'].upper()} FVG: {fvg['low']:.2f}-{fvg['high']:.2f} (midpoint={fvg['midpoint']:.2f}) filled={fvg['filled']}" for fvg in ict_data.get('m15_fvg', [])[:4]])}
+FVG H1:
+{chr(10).join([f"  {fvg['type'].upper()} FVG: {fvg['low']:.2f}-{fvg['high']:.2f} (midpoint={fvg['midpoint']:.2f}) filled={fvg['filled']}" for fvg in ict_data.get('h1_fvg', [])[:4]])}
 
-MSS M1: {ict_data.get('m1_mss', 'None')}
-BOS M15: {ict_data.get('m15_bos', 'None')}
+MSS M5: {ict_data.get('m5_mss', 'None')}
+BOS H1: {ict_data.get('h1_bos', 'None')}
 
 LIQUIDITY POOLS:
 - Recent High: {ict_data.get('liquidity_pools', {}).get('recent_high', 0):.2f}
@@ -854,7 +856,7 @@ ATURAN KRITIS:
 4. Setiap level harus punya alasan ICT yang jelas
 
 KONDISI SAAT INI:
-{"Belum ada BOS — set level untuk konfirmasi BOS atau reversal awal" if not ict_data.get('m15_bos') and not ict_data.get('m1_mss') else "Ada MSS/BOS — set level untuk konfirmasi entry atau invalidasi"}
+{"Belum ada BOS — set level untuk konfirmasi BOS atau reversal awal" if not ict_data.get('h1_bos') and not ict_data.get('m5_mss') else "Ada MSS/BOS — set level untuk konfirmasi entry atau invalidasi"}
 
 WAJIB: balas HANYA dengan JSON array murni, langsung mulai dari [ tanpa penjelasan, tanpa markdown, tanpa ```json:
 [
@@ -1088,6 +1090,18 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
                         "kondisi_reentry": debrief.get("new_rule",""),
                     })
                     logger.info(f"[DEBRIEF] Culprit: {debrief.get('culprit')} | {debrief.get('lesson')}")
+
+                    # Rules update — AI edit rules berdasarkan debrief
+                    updated = self.rules.ai_update_on_loss(
+                        client=self.groq_client,
+                        model=self.model_json,
+                        closed_trade=trade,
+                        debrief=debrief,
+                        current_price=self._prev_price,
+                    )
+                    if updated:
+                        logger.info(f"[RULES] ✅ Rules diupdate setelah loss — v{self.rules.rules.get('_version')}")
+
                 except Exception as e:
                     logger.error(f"[DEBRIEF ERROR] {e}")
                     self._post_trade_analysis(trade)
@@ -1177,7 +1191,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         Setiap fase hanya memanggil 1 AI — hemat token.
 
         Fase:
-          m15_scan    → AI-1 analisis M15, set watchlist M15
+          h1_scan    → AI-1 analisis H1, set watchlist H1
           idm_hunt    → AI-2 cari IDM, set notif level IDM
           bos_guard   → AI-3 konfirmasi BOS/MSS setelah IDM disentuh
           entry_sniper → AI-4 tentukan entry, SL, TP
@@ -1186,7 +1200,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
         ict_data = market_context.get("ict_preliminary", {})
         current_price = market_context.get("current_price", {}).get("bid", 0)
-        m1_candles = market_context.get("m1", {}).get("candles", [])
+        m5_candles = market_context.get("m5", {}).get("candles", [])
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         phase = self._phase
@@ -1194,26 +1208,30 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
         result = {"phase": phase, "session_id": session_id}
 
-        m15_candles = market_context.get("m15", {}).get("candles", [])
+        h1_candles = market_context.get("h1", {}).get("candles", [])
 
-        # ── FASE 1: M15 SCAN (AI-1) — Deteksi BOS + IDM M15 ──
-        if phase == "m15_scan":
+        # ── FASE 1: H1 SCAN (AI-1) — Deteksi BOS + IDM H1 ──
+        if phase == "h1_scan":
             # Python hitung semua dulu, tanpa token
-            bos = self.ict_analyzer.find_bos_m15(m15_candles)
-            idm_m15 = self.ict_analyzer.find_idm_after_bos(m15_candles, bos) if bos else None
-            obs = ict_data.get("m15_ob", [])
+            bos = self.ict_analyzer.find_bos_h1(h1_candles,
+                lookback=self.rules.bos_h1_lookback,
+                swing_min=self.rules.bos_h1_swing_min)
+            idm_h1 = self.ict_analyzer.find_idm_after_bos(h1_candles, bos,
+                gap_min=self.rules.idm_h1_gap_min,
+                max_search=self.rules.idm_h1_max_search) if bos else None
+            obs = ict_data.get("h1_ob", [])
             ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
-                m15_candles, obs, bos.get("type","") if bos else ""
+                h1_candles, obs, bos.get("type","") if bos else ""
             )
 
-            out = ai1_m15_analysis(
+            out = ai1_h1_analysis(
                 self.ai_panel[0], self.model_ai1,
                 ict_data, current_price,
-                bos_m15=bos, idm_m15=idm_m15, ob_sweep=ob_sweep
+                bos_h1=bos, idm_h1=idm_h1, ob_sweep=ob_sweep
             )
             self._current_bias = out.get("bias", "neutral")
-            self._bos_m15 = bos or {}
-            self._idm_m15 = idm_m15 or {}
+            self._bos_h1 = bos or {}
+            self._idm_h1 = idm_h1 or {}
             result["ai1"] = out
 
             if out.get("chat_msg"):
@@ -1225,9 +1243,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             if wl and out.get("bos_found") and not out.get("fakeout_detected"):
                 self.watchlist.clear_untriggered()
                 self.watchlist.add_many(wl, session_id)
-                self._phase = "idm_m15_wait"  # Tunggu IDM M15 disentuh
-                logger.info(f"[AI-1] BOS {self._current_bias} | IDM M15 @ "
-                           f"{self._idm_m15.get('watch_level', self._idm_m15.get('level',0)):.2f} (low candle A) | Fase → idm_m15_wait")
+                self._phase = "idm_h1_wait"  # Tunggu IDM H1 disentuh
+                logger.info(f"[AI-1] BOS {self._current_bias} | IDM H1 @ "
+                           f"{self._idm_h1.get('watch_level', self._idm_h1.get('level',0)):.2f} (low candle A) | Fase → idm_h1_wait")
             elif out.get("fakeout_detected"):
                 # Pasang watchlist konfirmasi OB break
                 if wl:
@@ -1235,22 +1253,22 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                     self.watchlist.add_many(wl, session_id)
                 logger.info(f"[AI-1] Fakeout OB detected — watchlist konfirmasi OB break")
             else:
-                logger.info("[AI-1] Belum ada BOS M15 — retry scan berikutnya")
+                logger.info("[AI-1] Belum ada BOS H1 — retry scan berikutnya")
 
-        # ── FASE 1b: TUNGGU IDM M15 DISENTUH (AI-1 masih jaga) ──
-        elif phase == "idm_m15_wait":
-            idm_level = self._idm_m15.get("watch_level", self._idm_m15.get("level", 0))
-            idm_type  = self._idm_m15.get("type", "")
+        # ── FASE 1b: TUNGGU IDM H1 DISENTUH (AI-1 masih jaga) ──
+        elif phase == "idm_h1_wait":
+            idm_level = self._idm_h1.get("watch_level", self._idm_h1.get("level", 0))
+            idm_type  = self._idm_h1.get("type", "")
 
-            # Cek apakah IDM M15 sudah disentuh (wick atau body)
+            # Cek apakah IDM H1 sudah disentuh (wick atau body)
             touch = self.ict_analyzer.check_idm_touched(
-                m15_candles, idm_level, self._current_bias
+                h1_candles, idm_level, self._current_bias
             )
 
             # Cek OB sweep paralel
-            obs = ict_data.get("m15_ob", [])
+            obs = ict_data.get("h1_ob", [])
             ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
-                m15_candles, obs, self._bos_m15.get("type","")
+                h1_candles, obs, self._bos_h1.get("type","")
             )
 
             if ob_sweep.get("confirmed_break"):
@@ -1259,25 +1277,25 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 api_server.start_session(session_id, {}, "")
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
                 api_server.finish_session({"consensus": "invalidasi_bos"})
-                self._phase = "m15_scan"
-                self._bos_m15 = {}
-                self._idm_m15 = {}
+                self._phase = "h1_scan"
+                self._bos_h1 = {}
+                self._idm_h1 = {}
                 self.watchlist.clear_untriggered()
-                logger.info(f"[AI-1] OB break confirmed — reset ke m15_scan")
+                logger.info(f"[AI-1] OB break confirmed — reset ke h1_scan")
 
             elif ob_sweep.get("fakeout"):
                 # Wick saja → aman, pantau terus
-                logger.info(f"[AI-1] OB wick saja (fakeout) — lanjut pantau IDM M15 @ {idm_level:.2f}")
+                logger.info(f"[AI-1] OB wick saja (fakeout) — lanjut pantau IDM H1 @ {idm_level:.2f}")
 
             elif touch:
-                # IDM M15 disentuh → hitung swing range → serahkan ke AI-2
+                # IDM H1 disentuh → hitung swing range → serahkan ke AI-2
                 swing_range = self.ict_analyzer.get_swing_range_after_idm_touch(
-                    m15_candles, self._bos_m15, touch
+                    h1_candles, self._bos_h1, touch
                 )
                 self._swing_range = swing_range
                 sh = swing_range.get("swing_high", 0)
                 sl = swing_range.get("swing_low", 0)
-                m1_dir = swing_range.get("m1_idm_direction", "bearish")
+                m5_dir = swing_range.get("m5_idm_direction", "bearish")
 
                 # OB low untuk dipantau AI-1 paralel dengan AI-2
                 ob_watch = 0
@@ -1308,51 +1326,53 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
                 touch_type = touch.get("touch_type", "wick")
                 msg = (
-                    f"Hiura: IDM M15 {idm_type} disentuh ({touch_type}) di {idm_level:.2f}. "
-                    f"SH={sh:.2f} SL={sl:.2f}. Serahkan ke Senanan cari IDM {m1_dir} M1."
+                    f"Hiura: IDM H1 {idm_type} disentuh ({touch_type}) di {idm_level:.2f}. "
+                    f"SH={sh:.2f} SL={sl:.2f}. Serahkan ke Senanan cari IDM {m5_dir} M5."
                     + (f" Pantau OB @ {ob_watch:.2f}." if ob_watch else "")
                 )
                 api_server.start_session(session_id, {}, "")
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-                api_server.finish_session({"consensus": "idm_m15_touched"})
+                api_server.finish_session({"consensus": "idm_h1_touched"})
 
                 self._phase = "idm_hunt"
-                logger.info(f"[AI-1] IDM M15 disentuh ({touch_type}) — SH={sh:.2f} SL={sl:.2f} | Fase → idm_hunt")
+                logger.info(f"[AI-1] IDM H1 disentuh ({touch_type}) — SH={sh:.2f} SL={sl:.2f} | Fase → idm_hunt")
             else:
-                logger.info(f"[AI-1] Tunggu IDM M15 @ {idm_level:.2f} | harga {current_price:.2f}")
+                logger.info(f"[AI-1] Tunggu IDM H1 @ {idm_level:.2f} | harga {current_price:.2f}")
 
-        # ── FASE 2: IDM HUNT M1 (AI-2) ──────────────────────
+        # ── FASE 2: IDM HUNT M5 (AI-2) ──────────────────────
         elif phase == "idm_hunt":
             # Cek dulu OB watch (AI-1 tetap jaga paralel)
             if self._ob_watch_level > 0:
-                obs = ict_data.get("m15_ob", [])
+                obs = ict_data.get("h1_ob", [])
                 ob_check = self.ict_analyzer.check_ob_sweep_fakeout(
-                    m15_candles, obs, self._bos_m15.get("type","")
+                    h1_candles, obs, self._bos_h1.get("type","")
                 )
                 if ob_check.get("confirmed_break"):
                     msg = f"Hiura: OB di-break body! BOS {self._current_bias} invalid. Senanan stop — cari ulang."
                     api_server.start_session(session_id, {}, "")
                     api_server.push_message("ai1", "Hiura", msg, 1, session_id)
                     api_server.finish_session({"consensus": "invalidasi_bos"})
-                    self._phase = "m15_scan"
-                    self._bos_m15 = {}; self._idm_m15 = {}
+                    self._phase = "h1_scan"
+                    self._bos_h1 = {}; self._idm_h1 = {}
                     self._swing_range = {}; self._ob_watch_level = 0
                     self.watchlist.clear_untriggered()
-                    logger.info("[AI-1] OB body break saat idm_hunt — reset ke m15_scan")
+                    logger.info("[AI-1] OB body break saat idm_hunt — reset ke h1_scan")
                     return result
 
-            # Python cari IDM M1 dalam range SH-SL
+            # Python cari IDM M5 dalam range SH-SL
             sh = self._swing_range.get("swing_high", 0)
             sl = self._swing_range.get("swing_low", 0)
-            m1_dir = self._swing_range.get("m1_idm_direction", "bearish")
+            m5_dir = self._swing_range.get("m5_idm_direction", "bearish")
 
-            idm_m1 = self.ict_analyzer.find_idm_in_range(
-                m1_candles, m1_dir, sh, sl
+            idm_m5 = self.ict_analyzer.find_idm_in_range(
+                m5_candles, m5_dir, sh, sl,
+                gap_min=self.rules.idm_m5_gap_min,
+                max_search=self.rules.idm_m5_max_search,
             )
 
             out = ai2_idm_hunter(
                 self.ai_panel[1], self.model_ai2,
-                ict_data, idm_m1, self._swing_range, current_price
+                ict_data, idm_m5, self._swing_range, current_price
             )
             self._current_idm_level = out.get("idm_level", 0)
             result["ai2"] = out
@@ -1360,23 +1380,29 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             if out.get("chat_msg"):
                 api_server.start_session(session_id, {}, "")
                 api_server.push_message("ai2", "Senanan", out["chat_msg"], 1, session_id)
-                api_server.finish_session({"consensus": "idm_m1_found" if out.get("idm_valid") else "idm_m1_hunting"})
+                api_server.finish_session({"consensus": "idm_m5_found" if out.get("idm_valid") else "idm_m5_hunting"})
 
             wl = out.get("watchlist", [])
             if wl:
                 self.watchlist.add_many(wl, session_id)
 
+            sh_r = self._swing_range.get("swing_high", 0)
+            sl_r = self._swing_range.get("swing_low", 0)
+            range_pct = ((sh_r - sl_r) / sh_r * 100) if sh_r > 0 else 0
+            if range_pct < self.rules.swing_range_min_pct:
+                logger.warning(f"[AI-2] Range terlalu sempit {range_pct:.2f}% < {self.rules.swing_range_min_pct}%")
+
             if out.get("idm_valid") and self._current_idm_level > 0:
                 self._phase = "bos_guard"
-                logger.info(f"[AI-2] IDM M1 {m1_dir} @ {self._current_idm_level:.2f} | Fase → bos_guard")
+                logger.info(f"[AI-2] IDM M5 {m5_dir} @ {self._current_idm_level:.2f} | Fase → bos_guard")
             else:
-                logger.info(f"[AI-2] IDM M1 belum terbentuk — pantau range {sl:.2f}–{sh:.2f}")
+                logger.info(f"[AI-2] IDM M5 belum terbentuk — pantau range {sl:.2f}–{sh:.2f}")
 
         # ── FASE 3: BOS/MSS GUARD (AI-3) ─────────────────
         elif phase == "bos_guard":
-            # Cek BOS M1 via Python analyzer
-            bos_py = self.ict_analyzer.check_bos_m1(
-                m1_candles, self._current_bias, self._current_idm_level
+            # Cek BOS M5 via Python analyzer
+            bos_py = self.ict_analyzer.check_bos_m5(
+                m5_candles, self._current_bias, self._current_idm_level
             )
 
             out = ai3_bos_mss_guard(
@@ -1418,7 +1444,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         elif phase == "entry_sniper":
             # MSNR dari Python analyzer
             msnr_dir = "support" if self._current_bias == "bullish" else "resistance"
-            msnr_levels = self.ict_analyzer.msnr_level(m1_candles, msnr_dir)
+            msnr_levels = self.ict_analyzer.msnr_level(m5_candles, msnr_dir)
 
             # Trade memory untuk referensi AI-4
             trade_mem = self.memory.get_recent_trades(limit=5)
@@ -1449,7 +1475,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             tp    = out.get("tp", 0)
             conf  = out.get("confidence", 0)
 
-            if entry > 0 and sl > 0 and tp > 0 and conf >= 0.6:
+            if entry > 0 and sl > 0 and tp > 0 and conf >= self.rules.entry_min_confidence:
                 logger.info(f"[SPECIALIST] AI-4 Entry signal | {self._current_bias.upper()} "
                            f"@ {entry:.2f} | SL {sl:.2f} | TP {tp:.2f} | conf {conf:.0%}")
 
@@ -1484,11 +1510,11 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 logger.info(f"[SPECIALIST] AI-4 skip eksekusi | conf={conf:.0%} | entry={entry} sl={sl} tp={tp}")
                 result["executed"] = False
 
-            # Reset ke M15 scan untuk siklus berikutnya
-            self._phase = "m15_scan"
+            # Reset ke H1 scan untuk siklus berikutnya
+            self._phase = "h1_scan"
             self._current_idm_level = 0
             self._current_bos_level = 0
-            logger.info("[SPECIALIST] Siklus selesai — reset ke m15_scan")
+            logger.info("[SPECIALIST] Siklus selesai — reset ke h1_scan")
 
         api_server.update_watchlist(self.watchlist.to_api_dict())
         return result
@@ -1526,6 +1552,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                     continue
 
                 # ICT preliminary check (Python-side, tidak pakai token)
+                # Reload rules setiap siklus (AI bisa update kapan saja)
+                self.rules.reload()
+
                 ict_pre = self.ict_analyzer.quick_check(market_context)
                 market_context["ict_preliminary"] = ict_pre
 
@@ -1552,13 +1581,13 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                     logger.info(f"[SPECIALIST] {len(triggered)} trigger → fase {self._phase}")
                     _run_safe(triggered[-1])
 
-                elif self._phase == "m15_scan":
+                elif self._phase == "h1_scan":
                     # Fase scan: jalankan SETIAP siklus (BOS bisa terjadi kapan saja)
                     # Tidak perlu trigger — langsung cek BOS via Python, panggil AI-1
                     _run_safe()
 
-                elif self._phase in ("idm_m15_wait",):
-                    # Fase tunggu IDM M15: Python cek setiap siklus tanpa token
+                elif self._phase in ("idm_h1_wait",):
+                    # Fase tunggu IDM H1: Python cek setiap siklus tanpa token
                     # _run_specialist_cycle akan handle cek ini tanpa panggil AI
                     _run_safe()
 

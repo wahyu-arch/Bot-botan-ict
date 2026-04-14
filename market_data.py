@@ -63,26 +63,26 @@ class MarketDataFetcher:
             return None
 
     def _get_bybit_context(self) -> dict:
-        """Ambil klines M15 dan M1 dari Bybit."""
-        m15_candles = self._fetch_bybit_klines(interval="15", limit=50)
-        m1_candles  = self._fetch_bybit_klines(interval="1",  limit=30)
+        """Ambil klines H1 dan M5 dari Bybit."""
+        h1_candles = self._fetch_bybit_klines(interval="60", limit=50)
+        m5_candles  = self._fetch_bybit_klines(interval="5",  limit=30)
 
-        if not m15_candles or not m1_candles:
+        if not h1_candles or not m5_candles:
             logger.warning("Bybit klines kosong, fallback ke mock")
             return self._get_mock_context()
 
         # Ticker untuk spread/last price
         ticker = self._fetch_bybit_ticker()
-        bid  = float(ticker.get("bid1Price", m1_candles[-1]["close"]))
-        ask  = float(ticker.get("ask1Price", m1_candles[-1]["close"] * 1.0001))
+        bid  = float(ticker.get("bid1Price", m5_candles[-1]["close"]))
+        ask  = float(ticker.get("ask1Price", m5_candles[-1]["close"] * 1.0001))
         spread_usd = round(ask - bid, 4)
 
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": self.symbol,
             "current_price": {"bid": bid, "ask": ask, "spread": spread_usd},
-            "m15": {"candles": m15_candles},
-            "m1":  {"candles": m1_candles},
+            "h1": {"candles": h1_candles},
+            "m5":  {"candles": m5_candles},
             "open_positions": [],
         }
 
@@ -127,9 +127,9 @@ class MarketDataFetcher:
         return {}
 
     def _get_mock_context(self) -> dict:
-        m15_candles = self._generate_mock_candles(50, 15)
-        m1_candles  = self._generate_mock_candles(30, 1)
-        last = m1_candles[-1]["close"]
+        h1_candles = self._generate_mock_candles(50, 60)
+        m5_candles  = self._generate_mock_candles(30, 5)
+        last = m5_candles[-1]["close"]
         spread = last * 0.00005  # 0.005% spread simulasi
 
         return {
@@ -140,8 +140,8 @@ class MarketDataFetcher:
                 "ask":    round(last + spread / 2, 4),
                 "spread": round(spread, 4),
             },
-            "m15": {"candles": m15_candles},
-            "m1":  {"candles": m1_candles},
+            "h1": {"candles": h1_candles},
+            "m5":  {"candles": m5_candles},
             "open_positions": [],
         }
 

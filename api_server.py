@@ -110,6 +110,28 @@ def get_live():
     return jsonify({"status": "idle", "messages": [], "conclusion": None})
 
 
+@app.route("/api/rules")
+def get_rules():
+    """Rules aktif saat ini."""
+    import json, os
+    try:
+        with open("data/rules.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return '{"error": "rules not found"}', 404
+
+
+@app.route("/api/rules/history")
+def get_rules_history():
+    """History update rules."""
+    import json, os
+    try:
+        with open("data/rules_history.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return "[]", 200, {"Content-Type": "application/json"}
+
+
 @app.route("/api/stats")
 def get_stats():
     """Statistik trading: total trade, winrate, trade harian selama 30 hari."""
