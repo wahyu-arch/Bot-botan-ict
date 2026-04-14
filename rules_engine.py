@@ -90,7 +90,7 @@ class RulesEngine:
 
     @property
     def idm_h1_gap_min(self) -> int:
-        return int(self.get("idm_h1", "gap_min_candles", default=1))
+        return int(self.get( "gap_min_candles", default=1))
 
     @property
     def idm_h1_max_search(self) -> int:
