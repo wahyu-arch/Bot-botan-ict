@@ -714,30 +714,41 @@ class ICTAnalyzer:
 
     def get_swing_range_after_idm_touch(self, candles: list, bos: dict, touch_info: dict) -> dict:
         """
-        Setelah IDM M15 disentuh, hitung:
-        - SH = high tertinggi sejak BOS terbentuk (sebelum retrace ke IDM)
-        - SL = low dari candle yang sentuh IDM M15
+        Setelah IDM M15 disentuh, hitung range untuk AI-2 cari IDM di M1:
 
-        Range SH-SL ini diserahkan ke AI-2 untuk cari IDM di M1.
+        BOS bullish:
+          SH = high tertinggi sejak BOS (sh_since_bos) — batas atas range
+          SL = swing low SEBELUM BOS terbentuk (sl_before_bos) — batas bawah range
+               Ini adalah HL yang membentuk struktur bullish, biasanya di area OB atau di bawahnya.
+               Bukan low candle yang sentuh IDM — itu terlalu tinggi.
+
+        BOS bearish:
+          SH = swing high sebelum BOS (sh_before_bos)
+          SL = low tertinggi sejak BOS (sl_since_bos)
         """
         bos_type = bos.get("type", "")
 
         if bos_type == "bullish_bos":
-            sh = bos.get("sh_since_bos", 0)          # High tertinggi sejak BOS
-            sl = touch_info.get("touch_candle_low", 0)  # Low candle yang sentuh IDM
+            sh = bos.get("sh_since_bos", 0)       # High tertinggi sejak BOS
+            sl = bos.get("sl_before_bos", 0)       # Swing low SEBELUM BOS = HL struktur bullish
+            # Fallback: kalau sl_before_bos tidak ada, gunakan touch candle low
+            if sl == 0:
+                sl = touch_info.get("touch_candle_low", 0)
             return {
                 "swing_high": round(sh, 2),
                 "swing_low": round(sl, 2),
-                "m1_idm_direction": "bearish",  # M1 retrace → cari IDM bearish di M1
+                "m1_idm_direction": "bearish",
                 "range_valid": sh > sl > 0,
             }
         elif bos_type == "bearish_bos":
-            sl = bos.get("sl_since_bos", 0)
-            sh = touch_info.get("touch_candle_high", 0)
+            sh = bos.get("sh_before_bos", 0)       # Swing high sebelum BOS = LH struktur bearish
+            sl = bos.get("sl_since_bos", 0)         # Low terendah sejak BOS
+            if sh == 0:
+                sh = touch_info.get("touch_candle_high", 0)
             return {
                 "swing_high": round(sh, 2),
                 "swing_low": round(sl, 2),
-                "m1_idm_direction": "bullish",  # M1 retrace → cari IDM bullish di M1
+                "m1_idm_direction": "bullish",
                 "range_valid": sh > sl > 0,
             }
         return {"swing_high": 0, "swing_low": 0, "m1_idm_direction": "unknown", "range_valid": False}
