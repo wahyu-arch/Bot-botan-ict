@@ -111,14 +111,17 @@ def get_live():
 
 
 @app.route("/api/rules")
+@app.route("/api/rules/")
 def get_rules():
     """Rules aktif saat ini."""
     import json, os
+    os.makedirs("data", exist_ok=True)
     try:
         with open("data/rules.json") as f:
             return f.read(), 200, {"Content-Type": "application/json"}
     except Exception:
-        return '{"error": "rules not found"}', 404
+        # File belum ada — kembalikan default kosong
+        return '{"_version": 1, "_update_reason": "File not created yet — bot belum jalan"}', 200, {"Content-Type": "application/json"}
 
 
 @app.route("/api/rules/history")

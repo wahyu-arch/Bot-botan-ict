@@ -125,10 +125,10 @@ class ICTTradingBot:
         # Model per client — pakai model berbeda agar limit tidak saling berbagi
         # Yusuf (groq_client) = model utama untuk analisis ICT
         # AI Panel = model yang lebih ringan, limit terpisah
-        self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "qwen/qwen3-32b")
-        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "qwen/qwen3-32b")
-        self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "qwen/qwen3-32b")
-        self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "qwen/qwen3-32b")
+        self.model_main   = os.getenv("GROQ_MODEL_MAIN",   "llama-3.1-8b-instant")
+        self.model_ai1    = os.getenv("GROQ_MODEL_AI1",    "llama-3.3-70b-versatile")
+        self.model_ai2    = os.getenv("GROQ_MODEL_AI2",    "llama-3.3-70b-versatile")
+        self.model_ai3    = os.getenv("GROQ_MODEL_AI3",    "llama-3.3-70b-versatile")
         self.model_panel  = [self.model_ai1, self.model_ai2, self.model_ai3]
         # model_json: model yang dipakai untuk output JSON terstruktur
         # Gunakan AI1 (lebih ringan) untuk JSON, main hanya untuk teks bebas
@@ -165,6 +165,7 @@ class ICTTradingBot:
         self._fvg_h1_touched: bool = False       # FVG H1 sudah disentuh wick
         self._swing_range: dict = {}              # SH/SL range untuk AI-2
         self._ob_watch_level: float = 0.0         # OB level yang dipantau AI-1
+        self._active_session_id: str = ""             # Session ID satu siklus analisis
 
         logger.info(
             f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
@@ -1201,7 +1202,10 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         ict_data = market_context.get("ict_preliminary", {})
         current_price = market_context.get("current_price", {}).get("bid", 0)
         m5_candles = market_context.get("m5", {}).get("candles", [])
-        session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        # Gunakan session yang sama selama satu siklus analisis
+        if not self._active_session_id or self._phase == "h1_scan":
+            self._active_session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        session_id = self._active_session_id
 
         phase = self._phase
         logger.info(f"[SPECIALIST] Fase: {phase.upper()} | Harga: {current_price:.2f}")
@@ -1233,9 +1237,10 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             result["ai1"] = out
 
             if out.get("chat_msg"):
+                # Start session baru untuk siklus ini
                 api_server.start_session(session_id, {}, "")
                 api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
-                api_server.finish_session({"consensus": f"bias_{self._current_bias}"})
+                # Tidak finish dulu — session akan diupdate seiring fase berjalan
 
             if bos and not out.get("fakeout_detected"):
                 # Pasang watchlist di FVG H1 — tunggu wick touch
@@ -1278,9 +1283,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             )
             if ob_sweep.get("confirmed_break"):
                 msg = f"Hiura: OB body break — BOS {self._current_bias} batal."
-                api_server.start_session(session_id, {}, "")
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
                 api_server.finish_session({"consensus": "invalidasi_bos"})
+                self._active_session_id = ""
                 self._phase = "h1_scan"
                 self._bos_h1 = {}
                 self.watchlist.clear_untriggered()
@@ -1347,9 +1352,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
                     msg = (f"Hiura: FVG H1 disentuh wick @ {fvg_wick_touched['low']:.2f}–{fvg_wick_touched['high']:.2f}. "
                            f"SH={sh:.2f} SL={sl:.2f}. Serahkan ke Senanan cari IDM {m5_dir} M5.")
-                    api_server.start_session(session_id, {}, "")
                     api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-                    api_server.finish_session({"consensus": "fvg_h1_touched"})
 
                     self._phase = "idm_hunt"
                     self._fvg_h1_touched = True
@@ -1367,9 +1370,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                 )
                 if ob_check.get("confirmed_break"):
                     msg = f"Hiura: OB di-break body! BOS {self._current_bias} invalid. Senanan stop — cari ulang."
-                    api_server.start_session(session_id, {}, "")
                     api_server.push_message("ai1", "Hiura", msg, 1, session_id)
                     api_server.finish_session({"consensus": "invalidasi_bos"})
+                    self._active_session_id = ""
                     self._phase = "h1_scan"
                     self._bos_h1 = {}; self._fvg_h1_touched = False
                     self._swing_range = {}; self._ob_watch_level = 0
@@ -1396,9 +1399,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             result["ai2"] = out
 
             if out.get("chat_msg"):
-                api_server.start_session(session_id, {}, "")
-                api_server.push_message("ai2", "Senanan", out["chat_msg"], 1, session_id)
-                api_server.finish_session({"consensus": "idm_m5_found" if out.get("idm_valid") else "idm_m5_hunting"})
+                api_server.push_message("ai2", "Senanan", out["chat_msg"], 2, session_id)
 
             wl = out.get("watchlist", [])
             if wl:
@@ -1433,9 +1434,7 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
             # Push ke grup
             if out.get("chat_msg"):
-                api_server.start_session(session_id, {}, "")
-                api_server.push_message("ai3", "⚡ AI-3 BOS/MSS", out["chat_msg"], 1, session_id)
-                api_server.finish_session({"consensus": decision})
+                api_server.push_message("ai3", "Shina", out["chat_msg"], 3, session_id)
 
             if decision == "bos":
                 self._current_bos_level = bos_py["level"] if bos_py else current_price

@@ -77,97 +77,59 @@ def _call(client: Groq, model: str, prompt: str, max_tokens: int = 400, temp: fl
 
 # ══════════════════════════════════════════════════════════
 # AI-1: H1 ANALYST
-# Tugas: deteksi BOS H1 → cari IDM H1 → pasang watchlist
-# Alur:
-#   1. Deteksi BOS H1 (Python sudah hitung)
-#   2. Cari IDM H1 setelah BOS (Python sudah hitung)
-#   3. Pasang watchlist di level IDM H1
-#   4. Cek OB sweep fakeout sebelum serahkan ke AI-2
-# Token: sangat ringan — hanya terima hasil Python, beri narasi
+# Tugas: deteksi BOS H1 → pantau FVG H1 → serahkan ke AI-2
+# Tidak ada IDM H1. Alur: BOS H1 → FVG H1 wick touch → IDM M5
 # ══════════════════════════════════════════════════════════
 
 def ai1_h1_analysis(client: Groq, model: str, ict_data: dict, current_price: float,
                      bos_h1: dict = None, idm_h1: dict = None,
                      ob_sweep: dict = None) -> dict:
     """
-    AI-1 narasi BOS + IDM H1, konfirmasi watchlist.
-    Semua deteksi sudah dilakukan Python — AI hanya narasi dan konfirmasi.
+    AI-1 narasi BOS H1. Tidak ada IDM H1.
+    Setelah BOS, tunggu FVG H1 disentuh wick → serahkan ke AI-2 cari IDM M5.
     """
-    # Jika tidak ada BOS — cukup report neutral
     if not bos_h1:
         bias = ict_data.get("h1_bias", {})
         return {
             "bias": bias.get("direction", "neutral"),
             "reason": bias.get("reason", "belum ada BOS"),
             "bos_found": False,
-            "chat_msg": f"Hiura: belum ada BOS H1 yang bersih. Bias {bias.get('direction','neutral')}. Pantau dulu.",
+            "chat_msg": f"Hiura: belum ada BOS H1 yang bersih. Bias {bias.get('direction','neutral')}.",
             "watchlist": [],
         }
 
-    bos_type = bos_h1.get("type", "")
+    bos_type  = bos_h1.get("type", "")
     bos_level = bos_h1.get("level", 0)
-    bias = "bullish" if bos_type == "bullish_bos" else "bearish"
+    bias      = "bullish" if bos_type == "bullish_bos" else "bearish"
 
-    # Cek fakeout OB sweep
-    fakeout_msg = ""
-    if ob_sweep and ob_sweep.get("fakeout"):
-        fakeout_msg = f"\n⚠️ FAKEOUT ALERT: {ob_sweep.get('message','')}"
+    fvgs = ict_data.get("h1_fvg", [])
+    fresh_fvgs = [f for f in fvgs if not f.get("filled")]
 
-    # Watchlist: pasang di level IDM H1 jika ada
     watchlist = []
-    idm_level = 0
 
-    if idm_h1 and not (ob_sweep and ob_sweep.get("fakeout")):
-        # watch_level = low candle A (BOS bullish) atau high candle A (BOS bearish)
-        idm_level = idm_h1.get("watch_level", idm_h1.get("level", 0))
-        idm_type  = idm_h1.get("type", "")
-        desc      = idm_h1.get("description", f"IDM H1 {idm_type} @ {idm_level:.2f}")
-        if idm_level > 0:
-            watchlist.append({
-                "level": idm_level,
-                "condition": "touch",
-                "reason": desc,
-                "for_ai": "AI-1-IDM-TOUCHED",
-                "phase": "waiting_idm_touch",
-            })
-
-    # Jika fakeout — pasang watchlist konfirmasi OB break
-    elif ob_sweep and ob_sweep.get("fakeout"):
-        ob_lvl = ob_sweep.get("ob_level", 0)
-        if bias == "bullish":
-            watchlist.append({
-                "level": ob_lvl,
-                "condition": "break_below",
-                "reason": f"Konfirmasi OB break — close H1 di bawah {ob_lvl:.2f} = bearish valid",
-                "for_ai": "AI-1",
-                "phase": "waiting_ob_confirm",
-            })
-        else:
-            watchlist.append({
-                "level": ob_lvl,
-                "condition": "break_above",
-                "reason": f"Konfirmasi OB break — close H1 di atas {ob_lvl:.2f} = bullish valid",
-                "for_ai": "AI-1",
-                "phase": "waiting_ob_confirm",
-            })
-
-    # Narasi singkat untuk chat grup
     if ob_sweep and ob_sweep.get("fakeout"):
-        chat_msg = f"Hiura: ada BOS {bias} H1 di {bos_level:.2f}, tapi OB ke-sweep — kemungkinan fakeout. Tunggu konfirmasi close dulu.{fakeout_msg}"
-    elif idm_level > 0:
-        chat_msg = f"Hiura: BOS {bias} H1 terkonfirmasi di {bos_level:.2f}. Pantau low IDM H1 @ {idm_level:.2f} — retrace harus sentuh sini."
+        ob_lvl = ob_sweep.get("ob_level", 0)
+        cond   = "break_below" if bias == "bullish" else "break_above"
+        watchlist.append({
+            "level": ob_lvl, "condition": cond,
+            "reason": f"OB sweep fakeout — tunggu close konfirmasi di {ob_lvl:.2f}",
+            "for_ai": "AI-1", "phase": "waiting_ob_confirm",
+        })
+        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f}, OB ke-sweep. Fakeout? Tunggu konfirmasi dulu."
+    elif not fresh_fvgs:
+        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f} tapi tidak ada FVG fresh. Pantau."
     else:
-        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f}, tapi IDM H1 belum terbentuk. Pantau dulu."
+        fvg_info = ", ".join([f"{f['low']:.2f}–{f['high']:.2f}" for f in fresh_fvgs[:2]])
+        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f}. FVG H1: {fvg_info}. Tunggu wick touch."
 
-    logger.info(f"[AI-1] BOS={bos_type} @ {bos_level:.2f} | IDM={idm_level:.2f} | "
-                f"fakeout={ob_sweep.get('fakeout') if ob_sweep else False} | watchlist={len(watchlist)}")
+    logger.info(f"[AI-1] BOS={bos_type} @ {bos_level:.2f} | FVG fresh={len(fresh_fvgs)} | "
+                f"fakeout={ob_sweep.get('fakeout') if ob_sweep else False}")
 
     return {
         "bias": bias,
         "bos_found": True,
         "bos_type": bos_type,
         "bos_level": bos_level,
-        "idm_h1_level": idm_level,
         "reason": f"BOS {bias} H1 @ {bos_level:.2f}",
         "chat_msg": chat_msg,
         "watchlist": watchlist,
@@ -249,7 +211,7 @@ def ai2_idm_hunter(client: Groq, model: str, ict_data: dict, idm_m5: dict | None
         )
         logger.info(f"[AI-2] IDM M5 belum ada | range {sl:.2f}–{sh:.2f} | pantau batas")
     else:
-        chat_msg = "Senanan: range dari AI-1 belum valid, tunggu IDM H1 disentuh dulu."
+        chat_msg = "Senanan: range dari AI-1 belum valid, tunggu FVG H1 disentuh dulu."
         logger.warning("[AI-2] swing_range tidak valid")
 
     return {
