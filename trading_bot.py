@@ -1558,13 +1558,13 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                     # Tidak perlu trigger — langsung cek BOS via Python, panggil AI-1
                     _run_safe()
 
-                elif self._phase in ("fvg_h1_wait",):
-                    # Fase tunggu IDM H1: Python cek setiap siklus tanpa token
-                    # _run_specialist_cycle akan handle cek ini tanpa panggil AI
+                elif self._phase in ("fvg_h1_wait", "entry_sniper"):
+                    # fvg_h1_wait: Python cek wick touch setiap siklus (0 token)
+                    # entry_sniper: AI-4 harus langsung jalan setelah BOS guard konfirmasi
                     _run_safe()
 
                 else:
-                    # Fase lain (idm_hunt, bos_guard, entry_sniper) — tunggu trigger
+                    # Fase lain (idm_hunt, bos_guard) — tunggu trigger
                     active = self.watchlist.get_active()
                     logger.info(
                         f"[BOT] 💰 {current_price:.2f} | "
