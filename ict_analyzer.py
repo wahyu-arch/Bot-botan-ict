@@ -20,13 +20,17 @@ class ICTAnalyzer:
         h1 = market_context.get("h1", {})
         m5 = market_context.get("m5", {})
 
+        # H1: hanya struktur BOS + FVG (tidak ada OB)
+        # FVG hanya dari candle yang sudah close (skip candle terakhir yg masih berjalan)
+        h1_closed = h1.get("candles", [])[:-1] if h1.get("candles") else []
+        m5_closed = m5.get("candles", [])[:-1] if m5.get("candles") else []
+
         result = {
             "h1_bias": self._detect_bias(h1.get("candles", [])),
-            "h1_ob": self._find_order_blocks(h1.get("candles", [])),
-            "h1_fvg": self._find_fvg(h1.get("candles", [])),
+            "h1_fvg": self._find_fvg(h1_closed),   # FVG dari candle closed saja
             "h1_bos": self._detect_bos(h1.get("candles", [])),
             "m5_mss": self._detect_mss(m5.get("candles", [])),
-            "m5_fvg": self._find_fvg(m5.get("candles", [])),
+            "m5_fvg": self._find_fvg(m5_closed),
             "liquidity_pools": self._identify_liquidity(h1.get("candles", [])),
         }
 
@@ -829,3 +833,116 @@ class ICTAnalyzer:
                  if swing_low <= idm["level"] <= swing_high]
 
         return valid[-1] if valid else None
+
+    def check_fvg_wick_touched(self, candles: list, bos_type: str) -> dict | None:
+        """
+        Cek apakah ada candle (closed) yang wick-menyentuh FVG H1.
+
+        Wick touch = wick masuk zona FVG tapi body CLOSE masih di luar zona.
+        Body close menembus FVG = FVG invalid (skip, cari FVG lain).
+
+        BOS bullish → cari FVG bullish yang disentuh wick dari bawah (harga retrace turun)
+        BOS bearish → cari FVG bearish yang disentuh wick dari atas (harga retrace naik)
+
+        Return: {fvg, touch_candle, sh, sl} atau None
+        """
+        if len(candles) < 4:
+            return None
+
+        # Skip candle terakhir (masih berjalan)
+        closed = candles[:-1]
+        fvgs = self._find_fvg(closed)
+
+        # Ambil FVG yang relevan dengan BOS
+        if bos_type == "bullish_bos":
+            relevant_fvgs = [f for f in fvgs if f["type"] == "bullish" and not f["filled"]]
+        else:
+            relevant_fvgs = [f for f in fvgs if f["type"] == "bearish" and not f["filled"]]
+
+        if not relevant_fvgs:
+            return None
+
+        # Cek dari candle terbaru ke belakang (max 10 candle terakhir)
+        for candle in reversed(closed[-10:]):
+            c_high  = candle["high"]
+            c_low   = candle["low"]
+            c_close = candle["close"]
+            c_open  = candle["open"]
+            body_top = max(c_close, c_open)
+            body_bot = min(c_close, c_open)
+
+            for fvg in relevant_fvgs:
+                fvg_low  = fvg["low"]
+                fvg_high = fvg["high"]
+
+                if bos_type == "bullish_bos":
+                    # Retrace turun: wick bawah masuk FVG, tapi body close masih di atas fvg_low
+                    wick_inside = c_low <= fvg_high  # wick menyentuh atau masuk zona
+                    body_outside = body_bot >= fvg_low  # body close masih di atas batas bawah FVG
+                    body_break = c_close < fvg_low  # body close tembus ke bawah = FVG invalid
+
+                    if body_break:
+                        fvg["filled"] = True  # mark invalid
+                        continue
+                    if wick_inside and body_outside:
+                        return {
+                            "fvg": fvg,
+                            "touch_candle": candle,
+                            "touch_type": "wick",
+                            "touch_price": round(c_low, 2),
+                        }
+
+                else:  # bearish_bos
+                    # Retrace naik: wick atas masuk FVG, body close masih di bawah fvg_high
+                    wick_inside = c_high >= fvg_low
+                    body_outside = body_top <= fvg_high
+                    body_break = c_close > fvg_high
+
+                    if body_break:
+                        fvg["filled"] = True
+                        continue
+                    if wick_inside and body_outside:
+                        return {
+                            "fvg": fvg,
+                            "touch_candle": candle,
+                            "touch_type": "wick",
+                            "touch_price": round(c_high, 2),
+                        }
+        return None
+
+    def get_sh_sl_from_bos(self, candles: list, bos: dict) -> dict:
+        """
+        Ambil SH dan SL dari struktur BOS H1 untuk diserahkan ke AI-2.
+
+        BOS bullish:
+          SH = high tertinggi sejak BOS terbentuk (sebelum retrace)
+          SL = swing low sebelum BOS (sl_before_bos) — level HL struktur bullish
+
+        BOS bearish:
+          SH = swing high sebelum BOS (sh_before_bos)
+          SL = low terendah sejak BOS
+        """
+        if not bos:
+            return {"swing_high": 0, "swing_low": 0, "m5_idm_direction": "unknown", "range_valid": False}
+
+        bos_type = bos.get("type", "")
+
+        if bos_type == "bullish_bos":
+            sh = bos.get("sh_since_bos", 0)
+            sl = bos.get("sl_before_bos", 0)
+            return {
+                "swing_high": round(sh, 2),
+                "swing_low": round(sl, 2),
+                "m5_idm_direction": "bearish",
+                "range_valid": sh > sl > 0,
+            }
+        elif bos_type == "bearish_bos":
+            sh = bos.get("sh_before_bos", 0)
+            sl = bos.get("sl_since_bos", 0)
+            return {
+                "swing_high": round(sh, 2),
+                "swing_low": round(sl, 2),
+                "m5_idm_direction": "bullish",
+                "range_valid": sh > sl > 0,
+            }
+        return {"swing_high": 0, "swing_low": 0, "m5_idm_direction": "unknown", "range_valid": False}

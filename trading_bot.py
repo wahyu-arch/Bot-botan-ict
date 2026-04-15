@@ -1220,16 +1220,12 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             bos = self.ict_analyzer.find_bos_h1(h1_candles,
                 lookback=self.rules.bos_h1_lookback,
                 swing_min=self.rules.bos_h1_swing_min)
-            obs  = ict_data.get("h1_ob", [])
             fvgs = ict_data.get("h1_fvg", [])
-            ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
-                h1_candles, obs, bos.get("type","") if bos else ""
-            )
 
             out = ai1_h1_analysis(
                 self.ai_panel[0], self.model_ai1,
                 ict_data, current_price,
-                bos_h1=bos, idm_h1=None, ob_sweep=ob_sweep
+                bos_h1=bos, idm_h1=None, ob_sweep=None
             )
             self._current_bias = out.get("bias", "neutral")
             self._bos_h1 = bos or {}
@@ -1237,148 +1233,107 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             result["ai1"] = out
 
             if out.get("chat_msg"):
-                # Start session baru untuk siklus ini
-                api_server.start_session(session_id, {}, "")
-                api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
-                # Tidak finish dulu — session akan diupdate seiring fase berjalan
+                if out.get("bos_found"):
+                    # Ada BOS — mulai sesi baru
+                    api_server.start_session(session_id, {}, "")
+                    api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
+                else:
+                    # Tidak ada BOS — push ke live feed saja, tidak buat sesi
+                    api_server.push_live_msg("ai1", "Hiura", out["chat_msg"])
 
-            if bos and not out.get("fakeout_detected"):
-                # Pasang watchlist di FVG H1 — tunggu wick touch
-                wl_fvg = []
-                for fvg in fvgs[:3]:
-                    if not fvg.get("filled"):
-                        wl_fvg.append({
-                            "level": fvg.get("midpoint", 0) or (fvg["low"] + fvg["high"]) / 2,
-                            "condition": "touch",
-                            "reason": f"FVG H1 {fvg.get('type','')} {fvg['low']:.2f}–{fvg['high']:.2f} — wick touch serahkan ke AI-2",
-                            "for_ai": "AI-1-FVG-TOUCHED",
-                            "phase": "fvg_h1_wait",
-                            "fvg_low": fvg["low"],
-                            "fvg_high": fvg["high"],
-                        })
-                if wl_fvg:
-                    self.watchlist.clear_untriggered()
-                    self.watchlist.add_many(wl_fvg, session_id)
+            if bos:
+                fresh_fvgs = [f for f in fvgs if not f.get("filled")]
+                if fresh_fvgs:
                     self._phase = "fvg_h1_wait"
-                    logger.info(f"[AI-1] BOS {self._current_bias} | {len(wl_fvg)} FVG H1 dipantau | Fase → fvg_h1_wait")
+                    logger.info(f"[AI-1] BOS {self._current_bias} @ {bos.get('level',0):.2f} | "
+                               f"{len(fresh_fvgs)} FVG H1 fresh | Fase → fvg_h1_wait")
                 else:
                     logger.info("[AI-1] BOS H1 ada tapi tidak ada FVG fresh")
-            elif out.get("fakeout_detected"):
-                wl = out.get("watchlist", [])
-                if wl:
-                    self.watchlist.clear_untriggered()
-                    self.watchlist.add_many(wl, session_id)
-                logger.info("[AI-1] Fakeout OB — watchlist konfirmasi")
             else:
                 logger.info("[AI-1] Belum ada BOS H1")
 
-        # ── FASE 1b: TUNGGU FVG H1 DISENTUH WICK (AI-1 jaga) ──
+        # ── FASE 1b: TUNGGU FVG H1 DISENTUH WICK ──
+        # Python cek setiap siklus (0 token). AI hanya dipanggil saat touch terjadi.
         elif phase == "fvg_h1_wait":
-            fvgs = ict_data.get("h1_fvg", [])
-            obs  = ict_data.get("h1_ob", [])
+            bos_type = self._bos_h1.get("type", "")
 
-            # Cek OB sweep — body close = BOS invalid
-            ob_sweep = self.ict_analyzer.check_ob_sweep_fakeout(
-                h1_candles, obs, self._bos_h1.get("type","")
-            )
-            if ob_sweep.get("confirmed_break"):
-                msg = f"Hiura: OB body break — BOS {self._current_bias} batal."
+            # Cek FVG wick touch via Python (candle closed saja, bukan candle berjalan)
+            touch_result = self.ict_analyzer.check_fvg_wick_touched(h1_candles, bos_type)
+
+            # Cek invalidasi BOS: close H1 melewati swing referensi
+            last_close = h1_candles[-2]["close"] if len(h1_candles) >= 2 else 0  # -2 karena skip candle berjalan
+            bos_invalid = False
+            if bos_type == "bullish_bos":
+                sl_ref = self._bos_h1.get("sl_before_bos", 0)
+                if sl_ref > 0 and last_close < sl_ref:
+                    bos_invalid = True
+                    logger.info(f"[AI-1] BOS bullish invalid — close {last_close:.2f} di bawah SL ref {sl_ref:.2f}")
+            elif bos_type == "bearish_bos":
+                sh_ref = self._bos_h1.get("sh_before_bos", 0)
+                if sh_ref > 0 and last_close > sh_ref:
+                    bos_invalid = True
+                    logger.info(f"[AI-1] BOS bearish invalid — close {last_close:.2f} di atas SH ref {sh_ref:.2f}")
+
+            if bos_invalid:
+                msg = f"Hiura: BOS {self._current_bias} H1 batal — struktur break. Cari BOS baru."
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
                 api_server.finish_session({"consensus": "invalidasi_bos"})
                 self._active_session_id = ""
                 self._phase = "h1_scan"
                 self._bos_h1 = {}
                 self.watchlist.clear_untriggered()
-                logger.info("[AI-1] OB break → reset h1_scan")
-            elif ob_sweep.get("fakeout"):
-                logger.info(f"[AI-1] OB wick saja — aman lanjut")
+
+            elif touch_result:
+                # FVG H1 disentuh wick → tandai SH/SL → serahkan ke AI-2
+                fvg     = touch_result["fvg"]
+                t_candle = touch_result["touch_candle"]
+
+                swing_range = self.ict_analyzer.get_sh_sl_from_bos(h1_candles, self._bos_h1)
+                self._swing_range = swing_range
+                sh    = swing_range.get("swing_high", 0)
+                sl    = swing_range.get("swing_low", 0)
+                m5_dir = swing_range.get("m5_idm_direction", "bearish")
+
+                self._ob_watch_level = 0  # tidak ada OB watch lagi
+
+                msg = (f"Hiura: FVG H1 {fvg['type']} disentuh wick @ "
+                       f"{fvg['low']:.2f}–{fvg['high']:.2f}. "
+                       f"SH={sh:.2f} SL={sl:.2f}. "
+                       f"Senanan cari IDM {m5_dir} M5 dalam range ini.")
+                api_server.push_message("ai1", "Hiura", msg, 1, session_id)
+
+                self._phase = "idm_hunt"
+                self._fvg_h1_touched = True
+                logger.info(f"[AI-1] FVG H1 wick touched | SH={sh:.2f} SL={sl:.2f} | Fase → idm_hunt")
             else:
-                # Cek FVG H1: apakah ada candle yang wick-touch FVG (bukan body break)
-                last_candle = h1_candles[-1] if h1_candles else {}
-                fvg_wick_touched = None
-                for fvg in fvgs[:3]:
-                    if fvg.get("filled"):
-                        continue
-                    # Wick touch: wick masuk zona tapi body close masih di luar
-                    fvg_low  = fvg["low"]
-                    fvg_high = fvg["high"]
-                    body_top  = max(last_candle.get("open",0), last_candle.get("close",0))
-                    body_bot  = min(last_candle.get("open",0), last_candle.get("close",0))
-                    if self._current_bias == "bullish":
-                        # Long: wick bawah masuk zona, close masih atas fvg_low
-                        if last_candle.get("low",0) <= fvg_high and body_bot >= fvg_low:
-                            fvg_wick_touched = fvg
-                            break
-                    else:
-                        # Short: wick atas masuk zona, close masih bawah fvg_high
-                        if last_candle.get("high",0) >= fvg_low and body_top <= fvg_high:
-                            fvg_wick_touched = fvg
-                            break
-
-                if fvg_wick_touched:
-                    # FVG H1 disentuh wick → hitung SH/SL dari BOS H1 → ke AI-2
-                    sh = self._bos_h1.get("sh_since_bos", 0) or self._bos_h1.get("level", 0)
-                    sl = self._bos_h1.get("sl_before_bos", 0)
-                    m5_dir = "bearish" if self._current_bias == "bullish" else "bullish"
-                    self._swing_range = {
-                        "swing_high": round(sh, 2),
-                        "swing_low":  round(sl, 2),
-                        "m5_idm_direction": m5_dir,
-                        "range_valid": sh > sl > 0,
-                    }
-
-                    # OB watch paralel
-                    ob_watch = 0
-                    for ob in obs:
-                        if self._current_bias == "bullish" and ob.get("type") == "bullish":
-                            ob_watch = ob.get("low", 0); break
-                        elif self._current_bias == "bearish" and ob.get("type") == "bearish":
-                            ob_watch = ob.get("high", 0); break
-                    self._ob_watch_level = ob_watch
-
-                    wl_new = []
-                    if ob_watch > 0:
-                        cond_ob = "break_below" if self._current_bias == "bullish" else "break_above"
-                        wl_new.append({
-                            "level": ob_watch,
-                            "condition": cond_ob,
-                            "reason": f"OB {ob_watch:.2f} — body close = BOS invalid",
-                            "for_ai": "AI-1",
-                            "phase": "ob_body_watch",
-                        })
-                    self.watchlist.clear_untriggered()
-                    if wl_new:
-                        self.watchlist.add_many(wl_new, session_id)
-
-                    msg = (f"Hiura: FVG H1 disentuh wick @ {fvg_wick_touched['low']:.2f}–{fvg_wick_touched['high']:.2f}. "
-                           f"SH={sh:.2f} SL={sl:.2f}. Serahkan ke Senanan cari IDM {m5_dir} M5.")
-                    api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-
-                    self._phase = "idm_hunt"
-                    self._fvg_h1_touched = True
-                    logger.info(f"[AI-1] FVG H1 wick touched → SH={sh:.2f} SL={sl:.2f} | Fase → idm_hunt")
-                else:
-                    logger.info(f"[AI-1] Tunggu FVG H1 wick touch | harga {current_price:.2f}")
+                logger.info(f"[AI-1] Tunggu FVG H1 wick touch | harga {current_price:.2f}")
 
         # ── FASE 2: IDM HUNT M5 (AI-2) ──────────────────────
         elif phase == "idm_hunt":
-            # Cek dulu OB watch (AI-1 tetap jaga paralel)
-            if self._ob_watch_level > 0:
-                obs = ict_data.get("h1_ob", [])
-                ob_check = self.ict_analyzer.check_ob_sweep_fakeout(
-                    h1_candles, obs, self._bos_h1.get("type","")
-                )
-                if ob_check.get("confirmed_break"):
-                    msg = f"Hiura: OB di-break body! BOS {self._current_bias} invalid. Senanan stop — cari ulang."
-                    api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-                    api_server.finish_session({"consensus": "invalidasi_bos"})
-                    self._active_session_id = ""
-                    self._phase = "h1_scan"
-                    self._bos_h1 = {}; self._fvg_h1_touched = False
-                    self._swing_range = {}; self._ob_watch_level = 0
-                    self.watchlist.clear_untriggered()
-                    logger.info("[AI-1] OB body break saat idm_hunt — reset ke h1_scan")
-                    return result
+            # Cek invalidasi BOS H1 sambil AI-2 kerja
+            last_close = h1_candles[-2]["close"] if len(h1_candles) >= 2 else 0
+            bos_type_now = self._bos_h1.get("type", "")
+            bos_invalid = False
+            if bos_type_now == "bullish_bos":
+                sl_ref = self._bos_h1.get("sl_before_bos", 0)
+                if sl_ref > 0 and last_close < sl_ref:
+                    bos_invalid = True
+            elif bos_type_now == "bearish_bos":
+                sh_ref = self._bos_h1.get("sh_before_bos", 0)
+                if sh_ref > 0 and last_close > sh_ref:
+                    bos_invalid = True
+
+            if bos_invalid:
+                msg = f"Hiura: BOS H1 invalid saat IDM hunt. Senanan stop — reset."
+                api_server.push_message("ai1", "Hiura", msg, 1, session_id)
+                api_server.finish_session({"consensus": "invalidasi_bos"})
+                self._active_session_id = ""
+                self._phase = "h1_scan"
+                self._bos_h1 = {}; self._fvg_h1_touched = False
+                self._swing_range = {}; self._ob_watch_level = 0
+                self.watchlist.clear_untriggered()
+                logger.info("[AI-1] BOS H1 invalid saat idm_hunt — reset ke h1_scan")
+                return result
 
             # Python cari IDM M5 dalam range SH-SL
             sh = self._swing_range.get("swing_high", 0)

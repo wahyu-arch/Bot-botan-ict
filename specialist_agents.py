@@ -88,52 +88,50 @@ def ai1_h1_analysis(client: Groq, model: str, ict_data: dict, current_price: flo
     AI-1 narasi BOS H1. Tidak ada IDM H1.
     Setelah BOS, tunggu FVG H1 disentuh wick → serahkan ke AI-2 cari IDM M5.
     """
-    if not bos_h1:
-        bias = ict_data.get("h1_bias", {})
-        return {
-            "bias": bias.get("direction", "neutral"),
-            "reason": bias.get("reason", "belum ada BOS"),
-            "bos_found": False,
-            "chat_msg": f"Hiura: belum ada BOS H1 yang bersih. Bias {bias.get('direction','neutral')}.",
-            "watchlist": [],
-        }
-
-    bos_type  = bos_h1.get("type", "")
-    bos_level = bos_h1.get("level", 0)
-    bias      = "bullish" if bos_type == "bullish_bos" else "bearish"
+    bos_type  = bos_h1.get("type",  "") if bos_h1 else ""
+    bos_level = bos_h1.get("level", 0)  if bos_h1 else 0
+    bias      = "bullish" if bos_type == "bullish_bos" else ("bearish" if bos_type == "bearish_bos" else "neutral")
 
     fvgs = ict_data.get("h1_fvg", [])
     fresh_fvgs = [f for f in fvgs if not f.get("filled")]
+    fvg_info = " | ".join([f"{f['type']} {f['low']:.2f}–{f['high']:.2f}" for f in fresh_fvgs[:3]]) or "tidak ada"
 
-    watchlist = []
+    liq = ict_data.get("liquidity_pools", {})
+    liq_info = f"Liq High={liq.get('recent_high',0):.2f} Low={liq.get('recent_low',0):.2f}"
 
-    if ob_sweep and ob_sweep.get("fakeout"):
-        ob_lvl = ob_sweep.get("ob_level", 0)
-        cond   = "break_below" if bias == "bullish" else "break_above"
-        watchlist.append({
-            "level": ob_lvl, "condition": cond,
-            "reason": f"OB sweep fakeout — tunggu close konfirmasi di {ob_lvl:.2f}",
-            "for_ai": "AI-1", "phase": "waiting_ob_confirm",
-        })
-        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f}, OB ke-sweep. Fakeout? Tunggu konfirmasi dulu."
-    elif not fresh_fvgs:
-        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f} tapi tidak ada FVG fresh. Pantau."
-    else:
-        fvg_info = ", ".join([f"{f['low']:.2f}–{f['high']:.2f}" for f in fresh_fvgs[:2]])
-        chat_msg = f"Hiura: BOS {bias} H1 di {bos_level:.2f}. FVG H1: {fvg_info}. Tunggu wick touch."
+    prompt = f"""Kamu adalah Hiura, AI analis struktur H1. Kamu baru saja cek kondisi market.
 
-    logger.info(f"[AI-1] BOS={bos_type} @ {bos_level:.2f} | FVG fresh={len(fresh_fvgs)} | "
-                f"fakeout={ob_sweep.get('fakeout') if ob_sweep else False}")
+DATA H1 (sudah diproses Python):
+- BOS: {"TIDAK ADA" if not bos_h1 else f"{bos_type} terkonfirmasi di {bos_level:.2f}"}
+- Bias: {bias}
+- FVG H1 fresh: {fvg_info}
+- {liq_info}
+- Harga saat ini: {current_price:.2f}
+
+TUGASMU:
+Kirim pesan singkat ke grup (gaya WA, santai tapi tajam). Ceritakan apa yang kamu lihat di H1.
+{"Belum ada BOS — sampaikan kondisi saat ini." if not bos_h1 else
+ f"Ada BOS {bias} — sampaikan BOS di mana, FVG yang relevan, dan bahwa kamu tunggu wick touch FVG." if fresh_fvgs else
+ f"Ada BOS {bias} tapi tidak ada FVG fresh — sampaikan ini."}
+
+Max 3 kalimat. Jangan sebut IDM. Tulis HANYA pesanmu (plain text)."""
+
+    raw = _call(client, model, prompt, max_tokens=150, temp=0.75)
+    chat_msg = raw.strip() if raw else (
+        f"Hiura: {'belum ada BOS H1.' if not bos_h1 else f'BOS {bias} H1 di {bos_level:.2f}. FVG: {fvg_info}.'}"
+    )
+
+    logger.info(f"[AI-1] BOS={bos_type} @ {bos_level:.2f} | FVG fresh={len(fresh_fvgs)}")
 
     return {
         "bias": bias,
-        "bos_found": True,
+        "bos_found": bool(bos_h1),
         "bos_type": bos_type,
         "bos_level": bos_level,
-        "reason": f"BOS {bias} H1 @ {bos_level:.2f}",
+        "reason": f"BOS {bias} H1 @ {bos_level:.2f}" if bos_h1 else "no BOS",
         "chat_msg": chat_msg,
-        "watchlist": watchlist,
-        "fakeout_detected": bool(ob_sweep and ob_sweep.get("fakeout")),
+        "watchlist": [],
+        "fakeout_detected": False,
     }
 
 

@@ -110,6 +110,27 @@ def get_live():
     return jsonify({"status": "idle", "messages": [], "conclusion": None})
 
 
+# Pesan-pesan singkat yang masuk ke live feed tanpa sesi formal
+_live_feed: list = []
+
+def push_live_msg(ai: str, nama: str, pesan: str):
+    """Push pesan ke live feed tanpa membuat sesi baru."""
+    global _live_feed
+    _live_feed.append({
+        "ai": ai, "nama": nama, "pesan": pesan,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "ronde": 0,
+        "side": "right" if ai == "yusuf" else "left",
+    })
+    _live_feed = _live_feed[-50:]  # max 50 pesan
+
+
+@app.route("/api/live/feed")
+def get_live_feed():
+    """Live feed: semua pesan singkat status AI (tidak perlu sesi)."""
+    return jsonify(_live_feed)
+
+
 @app.route("/api/rules")
 @app.route("/api/rules/")
 def get_rules():
