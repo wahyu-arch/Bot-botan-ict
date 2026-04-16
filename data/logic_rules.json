@@ -1,0 +1,102 @@
+{
+  "_version": 1,
+  "_last_updated": null,
+  "_update_reason": "Initial logic rules — dari SNIPER V4",
+  "_update_count": 0,
+
+  "find_bos_h1": {
+    "method": "swing_break",
+    "swing_left": 8,
+    "swing_right": 8,
+    "lookback": 100,
+    "confirmation": "close_candle",
+    "bullish_condition": "close > last_swing_high",
+    "bearish_condition": "close < last_swing_low",
+    "comment": "BOS H1: close candle melewati swing high/low. Swing pakai 8 kiri 8 kanan."
+  },
+
+  "find_fvg_h1": {
+    "method": "three_candle_gap",
+    "bullish_condition": "candle1_high < candle3_low",
+    "bearish_condition": "candle1_low > candle3_high",
+    "filter_by_bos": true,
+    "filled_condition": "price_closed_through_fvg",
+    "wick_touch_valid": true,
+    "body_break_invalid": true,
+    "min_gap_pct": 0.05,
+    "lookback": 20,
+    "comment": "FVG terbentuk dari gap candle 1 dan 3. Filter sesuai arah BOS. Wick touch valid, body break = invalid."
+  },
+
+  "find_idm_m5": {
+    "method": "state_machine",
+    "bullish": {
+      "candle_a": "swing_high",
+      "gap_condition": "next_candles_dont_break_high_a",
+      "gap_min_candles": 1,
+      "trigger_condition": "candle_breaks_high_a",
+      "watch_level": "low_of_candle_a",
+      "touch_rule": "wick_or_body"
+    },
+    "bearish": {
+      "candle_a": "swing_low",
+      "gap_condition": "next_candles_dont_break_low_a",
+      "gap_min_candles": 1,
+      "trigger_condition": "candle_breaks_low_a",
+      "watch_level": "high_of_candle_a",
+      "touch_rule": "wick_or_body"
+    },
+    "max_search_candles": 200,
+    "comment": "IDM M5: candle A → gap → tembus. Watch level = low/high candle A."
+  },
+
+  "find_bos_m5": {
+    "method": "freeze_range",
+    "freeze_from": "idm_start_candle",
+    "freeze_to": "idm_touch_candle",
+    "bullish_bos": "close_below_freeze_low",
+    "bearish_bos": "close_above_freeze_high",
+    "require_idm_first": true,
+    "comment": "BOS M5: setelah IDM disentuh, freeze range. BOS = close melewati batas freeze."
+  },
+
+  "find_mss_m5": {
+    "enabled": true,
+    "bullish_mss": "close_above_freeze_high_after_bearish_bos",
+    "bearish_mss": "close_below_freeze_low_after_bullish_bos",
+    "on_mss": "proceed_to_entry",
+    "on_opposite_break": "reset_idm_hunt",
+    "comment": "MSS M5: setelah BOS M5, IDM baru disentuh, harga break ke arah berlawanan = MSS."
+  },
+
+  "entry": {
+    "condition": "mss_candle_in_fvg_h1",
+    "long_price": "fvg_h1_top",
+    "short_price": "fvg_h1_bottom",
+    "order_type": "limit",
+    "skip_if_outside_fvg": true,
+    "comment": "Entry hanya kalau candle MSS di zona FVG H1. Limit order di top/bottom FVG."
+  },
+
+  "stop_loss": {
+    "source": "mss_candle_extreme",
+    "long_sl": "low_of_mss_candle",
+    "short_sl": "high_of_mss_candle",
+    "buffer_pct": 0.0,
+    "comment": "SL = low/high candle MSS. Buffer 0 secara default."
+  },
+
+  "take_profit": {
+    "target": "structure_high_low_since_bos",
+    "long_tp": "highest_high_since_bos_h1",
+    "short_tp": "lowest_low_since_bos_h1",
+    "min_rr": 2.0,
+    "comment": "TP = high/low tertinggi sejak BOS H1. Min RR 2:1."
+  },
+
+  "bos_h1_invalidation": {
+    "bullish_invalid": "close_h1_below_sl_before_bos",
+    "bearish_invalid": "close_h1_above_sh_before_bos",
+    "comment": "BOS H1 batal kalau close menembus swing referensi sebelum BOS."
+  }
+}
