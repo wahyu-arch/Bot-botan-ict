@@ -25,12 +25,16 @@ class ICTAnalyzer:
         h1_closed = h1.get("candles", [])[:-1] if h1.get("candles") else []
         m5_closed = m5.get("candles", [])[:-1] if m5.get("candles") else []
 
+        # Deteksi BOS H1 dulu supaya FVG bisa difilter sesuai arah BOS
+        h1_bos = self._detect_bos(h1.get("candles", []))
+        h1_bos_type = h1_bos.get("direction", "") if h1_bos else ""  # "bullish" atau "bearish"
+
         result = {
             "h1_bias": self._detect_bias(h1.get("candles", [])),
-            "h1_fvg": self._find_fvg(h1_closed),   # FVG dari candle closed saja
-            "h1_bos": self._detect_bos(h1.get("candles", [])),
+            "h1_fvg": self._find_fvg(h1_closed, bos_direction=h1_bos_type),
+            "h1_bos": h1_bos,
             "m5_mss": self._detect_mss(m5.get("candles", [])),
-            "m5_fvg": self._find_fvg(m5_closed),
+            "m5_fvg": self._find_fvg(m5_closed),  # M5 FVG tidak difilter arah
             "liquidity_pools": self._identify_liquidity(h1.get("candles", [])),
         }
 
@@ -165,11 +169,15 @@ class ICTAnalyzer:
 
         return order_blocks[-5:]
 
-    def _find_fvg(self, candles: list) -> list:
+    def _find_fvg(self, candles: list, bos_direction: str = "") -> list:
         """
         Fair Value Gap (Imbalance):
         Bullish FVG: candle[i].high < candle[i+2].low (gap antara high C1 dan low C3)
         Bearish FVG: candle[i].low > candle[i+2].high
+
+        bos_direction: "bullish" → hanya return FVG bullish (retrace ke bawah ke FVG)
+                       "bearish" → hanya return FVG bearish
+                       ""        → return semua (untuk M5, dll)
         """
         if len(candles) < 3:
             return []
@@ -207,25 +215,28 @@ class ICTAnalyzer:
                     "filled": False,
                 })
 
-        # Filter FVG yang belum terisi
+        # Filter FVG yang belum terisi + filter arah sesuai BOS
         if candles:
             last_price = candles[-1]["close"]
             unfilled = []
             for fvg in fvgs:
+                # Filter arah: BOS bullish = hanya FVG bullish, BOS bearish = hanya FVG bearish
+                if bos_direction == "bullish" and fvg["type"] != "bullish":
+                    continue
+                if bos_direction == "bearish" and fvg["type"] != "bearish":
+                    continue
+
                 if fvg["type"] == "bullish" and last_price > fvg["low"]:
-                    if last_price < fvg["high"]:
-                        fvg["filled"] = False  # Partially atau belum terisi
-                    else:
-                        fvg["filled"] = True
+                    fvg["filled"] = last_price >= fvg["high"]
                     unfilled.append(fvg)
                 elif fvg["type"] == "bearish" and last_price < fvg["high"]:
-                    if last_price > fvg["low"]:
-                        fvg["filled"] = False
-                    else:
-                        fvg["filled"] = True
+                    fvg["filled"] = last_price <= fvg["low"]
                     unfilled.append(fvg)
             return unfilled[-4:]
 
+        # Filter arah jika tidak ada last_price
+        if bos_direction:
+            fvgs = [f for f in fvgs if f["type"] == bos_direction]
         return fvgs[-4:]
 
     def _detect_bos(self, candles: list) -> Optional[dict]:
@@ -541,7 +552,8 @@ class ICTAnalyzer:
     # AI-1 Logic: BOS H1 → IDM H1 → Swing High/Low
     # ─────────────────────────────────────────────────────
 
-    def find_bos_h1(self, candles: list, lookback: int = 40, swing_min: int = 1) -> dict | None:
+    def find_bos_h1(self, candles: list, lookback: int = 40, swing_min: int = 1,
+                    swing_left: int = 8, swing_right: int = 8) -> dict | None:
         """
         Deteksi BOS H1 terbaru.
         BOS bullish: close candle melewati swing high sebelumnya
@@ -557,10 +569,16 @@ class ICTAnalyzer:
         # Kumpulkan swing highs dan lows
         swing_highs = []  # (idx, price)
         swing_lows  = []  # (idx, price)
-        for i in range(1, n-1):
-            if lookback[i]["high"] > lookback[i-1]["high"] and lookback[i]["high"] > lookback[i+1]["high"]:
+        # Pakai swing_left dan swing_right dari logic rules
+        sl_r = min(swing_left, swing_right, 3)  # min 3 untuk stabilitas
+        for i in range(sl_r, n - sl_r):
+            left_high  = all(lookback[i]["high"] >= lookback[j]["high"] for j in range(max(0,i-swing_left), i))
+            right_high = all(lookback[i]["high"] >= lookback[j]["high"] for j in range(i+1, min(n,i+swing_right+1)))
+            left_low   = all(lookback[i]["low"] <= lookback[j]["low"]  for j in range(max(0,i-swing_left), i))
+            right_low  = all(lookback[i]["low"] <= lookback[j]["low"]  for j in range(i+1, min(n,i+swing_right+1)))
+            if left_high and right_high:
                 swing_highs.append((i, lookback[i]["high"]))
-            if lookback[i]["low"] < lookback[i-1]["low"] and lookback[i]["low"] < lookback[i+1]["low"]:
+            if left_low and right_low:
                 swing_lows.append((i, lookback[i]["low"]))
 
         if not swing_highs or not swing_lows:

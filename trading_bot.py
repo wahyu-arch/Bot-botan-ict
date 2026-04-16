@@ -18,6 +18,7 @@ from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 from watchlist_engine import WatchlistEngine
 from rules_engine import RulesEngine
+from logic_engine import LogicEngine
 from specialist_agents import (
     ai1_h1_analysis, ai2_idm_hunter, ai3_bos_mss_guard,
     ai4_entry_sniper, loss_debrief
@@ -152,6 +153,7 @@ class ICTTradingBot:
 
         self.watchlist = WatchlistEngine()
         self.rules = RulesEngine()
+        self.logic = LogicEngine()
         self._prev_price: float = 0.0
         self._initial_analysis_done: bool = False
 
@@ -1101,7 +1103,17 @@ PENTING: gunakan angka dari data, bukan perkiraan bulat."""
                         current_price=self._prev_price,
                     )
                     if updated:
-                        logger.info(f"[RULES] ✅ Rules diupdate setelah loss — v{self.rules.rules.get('_version')}")
+                        logger.info(f"[RULES] ✅ Rules diupdate — v{self.rules.rules.get('_version')}")
+
+                    # Update logic rules (cara kerja bot) juga
+                    logic_updated = self.logic.ai_update_on_loss(
+                        client=self.groq_client,
+                        model=self.model_json,
+                        closed_trade=trade,
+                        debrief=debrief,
+                    )
+                    if logic_updated:
+                        logger.info(f"[LOGIC] ✅ Logic diupdate — v{self.logic.rules.get('_version')}")
 
                 except Exception as e:
                     logger.error(f"[DEBRIEF ERROR] {e}")
@@ -1219,7 +1231,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         if phase == "h1_scan":
             bos = self.ict_analyzer.find_bos_h1(h1_candles,
                 lookback=self.rules.bos_h1_lookback,
-                swing_min=self.rules.bos_h1_swing_min)
+                swing_min=self.rules.bos_h1_swing_min,
+                swing_left=self.logic.bos_h1_swing_left,
+                swing_right=self.logic.bos_h1_swing_right)
             fvgs = ict_data.get("h1_fvg", [])
 
             out = ai1_h1_analysis(
@@ -1524,8 +1538,9 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
                     continue
 
                 # ICT preliminary check (Python-side, tidak pakai token)
-                # Reload rules setiap siklus (AI bisa update kapan saja)
+                # Reload rules & logic setiap siklus (AI bisa update kapan saja)
                 self.rules.reload()
+                self.logic.reload()
 
                 ict_pre = self.ict_analyzer.quick_check(market_context)
                 market_context["ict_preliminary"] = ict_pre

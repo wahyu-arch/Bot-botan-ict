@@ -145,6 +145,28 @@ def get_rules():
         return '{"_version": 1, "_update_reason": "File not created yet — bot belum jalan"}', 200, {"Content-Type": "application/json"}
 
 
+@app.route("/api/logic")
+@app.route("/api/logic/")
+def get_logic():
+    """Logic rules aktif saat ini."""
+    os.makedirs("data", exist_ok=True)
+    try:
+        with open("data/logic_rules.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return '{"_version": 1, "_update_reason": "File not created yet"}', 200, {"Content-Type": "application/json"}
+
+
+@app.route("/api/logic/history")
+def get_logic_history():
+    """History update logic rules."""
+    try:
+        with open("data/logic_rules_history.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return "[]", 200, {"Content-Type": "application/json"}
+
+
 @app.route("/api/rules/history")
 def get_rules_history():
     """History update rules."""
