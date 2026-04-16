@@ -964,3 +964,46 @@ class ICTAnalyzer:
                 "range_valid": sh > sl > 0,
             }
         return {"swing_high": 0, "swing_low": 0, "m5_idm_direction": "unknown", "range_valid": False}
+
+    def check_choch_h1(self, candles: list, bos: dict) -> dict | None:
+        """
+        Deteksi CHOCH (Change of Character) H1.
+        CHOCH = BOS berlawanan dengan arah BOS sebelumnya.
+
+        BOS bullish aktif → harga close di bawah swing low sebelum BOS = CHOCH bearish
+        BOS bearish aktif → harga close di atas swing high sebelum BOS = CHOCH bullish
+
+        CHOCH berarti bias berubah total — perlu cari BOS baru.
+        Return: {"type": "choch_bearish|choch_bullish", "level": float, "close": float}
+        """
+        if not bos or len(candles) < 3:
+            return None
+
+        bos_type = bos.get("type", "")
+        last_candle = candles[-2] if len(candles) >= 2 else candles[-1]  # skip candle berjalan
+
+        if bos_type == "bullish_bos":
+            # CHOCH bearish: close di bawah swing low sebelum BOS
+            sl_ref = bos.get("sl_before_bos", 0)
+            if sl_ref > 0 and last_candle["close"] < sl_ref:
+                return {
+                    "type": "choch_bearish",
+                    "level": round(sl_ref, 2),
+                    "close": round(last_candle["close"], 2),
+                    "timestamp": last_candle.get("timestamp", ""),
+                    "description": f"CHOCH bearish: close {last_candle['close']:.2f} di bawah SL ref {sl_ref:.2f}",
+                }
+
+        elif bos_type == "bearish_bos":
+            # CHOCH bullish: close di atas swing high sebelum BOS
+            sh_ref = bos.get("sh_before_bos", 0)
+            if sh_ref > 0 and last_candle["close"] > sh_ref:
+                return {
+                    "type": "choch_bullish",
+                    "level": round(sh_ref, 2),
+                    "close": round(last_candle["close"], 2),
+                    "timestamp": last_candle.get("timestamp", ""),
+                    "description": f"CHOCH bullish: close {last_candle['close']:.2f} di atas SH ref {sh_ref:.2f}",
+                }
+
+        return None

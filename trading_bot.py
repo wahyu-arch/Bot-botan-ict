@@ -168,6 +168,7 @@ class ICTTradingBot:
         self._swing_range: dict = {}              # SH/SL range untuk AI-2
         self._ob_watch_level: float = 0.0         # OB level yang dipantau AI-1
         self._active_session_id: str = ""             # Session ID satu siklus analisis
+        self._last_bos_level: float = 0.0               # BOS level terakhir yang sudah dibuat sesi
 
         logger.info(
             f"Bot initialized | Symbol: {self.symbol} | Paper: {self.paper_trading}"
@@ -1214,10 +1215,8 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
         ict_data = market_context.get("ict_preliminary", {})
         current_price = market_context.get("current_price", {}).get("bid", 0)
         m5_candles = market_context.get("m5", {}).get("candles", [])
-        # Gunakan session yang sama selama satu siklus analisis
-        if not self._active_session_id or self._phase == "h1_scan":
-            self._active_session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        session_id = self._active_session_id
+        # Session ID hanya dibuat baru saat BOS baru ditemukan (ditangani di dalam fase h1_scan)
+        session_id = self._active_session_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         phase = self._phase
         logger.info(f"[SPECIALIST] Fase: {phase.upper()} | Harga: {current_price:.2f}")
@@ -1247,12 +1246,19 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             result["ai1"] = out
 
             if out.get("chat_msg"):
-                if out.get("bos_found"):
-                    # Ada BOS — mulai sesi baru
+                bos_level_now = out.get("bos_level", 0)
+                if out.get("bos_found") and bos_level_now != self._last_bos_level:
+                    # BOS baru ditemukan — buat sesi baru
+                    self._active_session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    self._last_bos_level = bos_level_now
+                    session_id = self._active_session_id
                     api_server.start_session(session_id, {}, "")
                     api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
+                elif out.get("bos_found"):
+                    # BOS sama — hanya push ke sesi yang ada
+                    api_server.push_message("ai1", "Hiura", out["chat_msg"], 1, session_id)
                 else:
-                    # Tidak ada BOS — push ke live feed saja, tidak buat sesi
+                    # Tidak ada BOS — push ke live feed saja
                     api_server.push_live_msg("ai1", "Hiura", out["chat_msg"])
 
             if bos:
@@ -1274,25 +1280,15 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
             # Cek FVG wick touch via Python (candle closed saja, bukan candle berjalan)
             touch_result = self.ict_analyzer.check_fvg_wick_touched(h1_candles, bos_type)
 
-            # Cek invalidasi BOS: close H1 melewati swing referensi
-            last_close = h1_candles[-2]["close"] if len(h1_candles) >= 2 else 0  # -2 karena skip candle berjalan
-            bos_invalid = False
-            if bos_type == "bullish_bos":
-                sl_ref = self._bos_h1.get("sl_before_bos", 0)
-                if sl_ref > 0 and last_close < sl_ref:
-                    bos_invalid = True
-                    logger.info(f"[AI-1] BOS bullish invalid — close {last_close:.2f} di bawah SL ref {sl_ref:.2f}")
-            elif bos_type == "bearish_bos":
-                sh_ref = self._bos_h1.get("sh_before_bos", 0)
-                if sh_ref > 0 and last_close > sh_ref:
-                    bos_invalid = True
-                    logger.info(f"[AI-1] BOS bearish invalid — close {last_close:.2f} di atas SH ref {sh_ref:.2f}")
-
-            if bos_invalid:
-                msg = f"Hiura: BOS {self._current_bias} H1 batal — struktur break. Cari BOS baru."
+            # Cek CHOCH H1 (BOS berlawanan = bias ganti total)
+            choch = self.ict_analyzer.check_choch_h1(h1_candles, self._bos_h1)
+            if choch:
+                logger.info(f"[AI-1] CHOCH: {choch.get('description','')}")
+                msg = f"Hiura: {choch.get('description','')} — BOS {self._current_bias} batal. Reset scan."
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-                api_server.finish_session({"consensus": "invalidasi_bos"})
+                api_server.finish_session({"consensus": f"choch_{choch.get('type','')}"})
                 self._active_session_id = ""
+                self._last_bos_level = 0.0
                 self._phase = "h1_scan"
                 self._bos_h1 = {}
                 self.watchlist.clear_untriggered()
@@ -1324,29 +1320,20 @@ WAJIB: balas HANYA JSON murni, langsung dari {{ tanpa penjelasan atau markdown:
 
         # ── FASE 2: IDM HUNT M5 (AI-2) ──────────────────────
         elif phase == "idm_hunt":
-            # Cek invalidasi BOS H1 sambil AI-2 kerja
-            last_close = h1_candles[-2]["close"] if len(h1_candles) >= 2 else 0
-            bos_type_now = self._bos_h1.get("type", "")
-            bos_invalid = False
-            if bos_type_now == "bullish_bos":
-                sl_ref = self._bos_h1.get("sl_before_bos", 0)
-                if sl_ref > 0 and last_close < sl_ref:
-                    bos_invalid = True
-            elif bos_type_now == "bearish_bos":
-                sh_ref = self._bos_h1.get("sh_before_bos", 0)
-                if sh_ref > 0 and last_close > sh_ref:
-                    bos_invalid = True
-
-            if bos_invalid:
-                msg = f"Hiura: BOS H1 invalid saat IDM hunt. Senanan stop — reset."
+            # Cek CHOCH H1 sambil AI-2 kerja
+            choch = self.ict_analyzer.check_choch_h1(h1_candles, self._bos_h1)
+            if choch:
+                logger.info(f"[AI-1] CHOCH saat idm_hunt: {choch.get('description','')}")
+                msg = f"Hiura: {choch.get('description','')} — Senanan stop, reset scan."
                 api_server.push_message("ai1", "Hiura", msg, 1, session_id)
-                api_server.finish_session({"consensus": "invalidasi_bos"})
+                api_server.finish_session({"consensus": f"choch_{choch.get('type','')}"})
                 self._active_session_id = ""
+                self._last_bos_level = 0.0
                 self._phase = "h1_scan"
                 self._bos_h1 = {}; self._fvg_h1_touched = False
                 self._swing_range = {}; self._ob_watch_level = 0
                 self.watchlist.clear_untriggered()
-                logger.info("[AI-1] BOS H1 invalid saat idm_hunt — reset ke h1_scan")
+                logger.info("[AI-1] CHOCH H1 saat idm_hunt — reset ke h1_scan")
                 return result
 
             # Python cari IDM M5 dalam range SH-SL
