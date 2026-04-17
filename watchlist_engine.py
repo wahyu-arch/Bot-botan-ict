@@ -148,4 +148,7 @@ class WatchlistEngine:
         return "\n".join(lines)
 
     def to_api_dict(self) -> list:
-        return self.items[-20:]  # kirim 20 item terakhir ke API
+        # Kirim semua aktif + 5 terakhir yang triggered (untuk history)
+        active = [i for i in self.items if not i.get('triggered')]
+        triggered = [i for i in self.items if i.get('triggered')][-5:]
+        return active + triggered

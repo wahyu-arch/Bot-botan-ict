@@ -462,6 +462,99 @@ class BotCore:
 
     # ── Monitor Trade ────────────────────────────────────
 
+    def _handle_user_chat(self, raw_data: dict):
+        """Cek apakah ada pesan user yang perlu dijawab Katyusha."""
+        if not self._katyusha_key:
+            return
+        try:
+            import requests as _req
+            port = int(os.environ.get("PORT", 8080))
+            resp = _req.get(f"http://localhost:{port}/api/chat/pending", timeout=3)
+            pending = resp.json()
+            if not pending:
+                return
+
+            # Ada pesan user — Katyusha jawab
+            user_msg = pending[-1].get("content", "")
+            logger.info(f"[CHAT] User: {user_msg[:60]}")
+
+            # Siapkan konteks bot
+            price    = raw_data.get("price", 0)
+            stats    = self.memory.get_stats()
+            balance  = self.executor.get_account_balance()
+            min_rr   = self.rules.tp_min_rr
+            phase    = self._phase
+
+            # Ringkasan rules/logic
+            rules_summary = json.dumps(
+                {k: v for k, v in self.rules.rules.items() if not k.startswith("_")},
+                ensure_ascii=False
+            )[:600]
+            logic_summary = json.dumps(
+                {k: v for k, v in self.logic.rules.items() if not k.startswith("_")},
+                ensure_ascii=False
+            )[:600]
+
+            watchlist_text = self.watchlist.summary()
+
+            prompt = f"""Kamu adalah Katyusha, supervisor ICT trading bot via Claude Sonnet.
+Kamu sedang chat langsung dengan owner bot.
+
+STATUS BOT SAAT INI:
+- Harga: {price}
+- Fase: {phase}
+- Saldo USDT: {balance:.2f}
+- Total trade: {stats.get('total_trades',0)} | Win rate: {stats.get('win_rate',0):.0%}
+- Min RR saat ini: {min_rr}
+- Watchlist aktif: {watchlist_text}
+
+RULES (ringkasan): {rules_summary}
+LOGIC (ringkasan): {logic_summary}
+
+PESAN DARI OWNER:
+{user_msg}
+
+TUGASMU:
+Jawab pertanyaan owner dengan jujur dan informatif.
+Jika owner minta ubah sesuatu (rules/logic/parameter) → jelaskan apa yang akan kamu ubah dan konfirmasi.
+Jika owner tanya tentang sistem → jelaskan dengan bahasa yang mudah dimengerti.
+Jika ada bug yang kamu ketahui → beritahu.
+Gaya: santai tapi informatif, seperti asisten yang kompeten.
+Max 5 kalimat."""
+
+            import requests
+            k_resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._katyusha_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://bot-botan-ict.railway.app",
+                },
+                json={
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                    "max_tokens": 400,
+                },
+                timeout=30,
+            )
+            answer = k_resp.json()["choices"][0]["message"]["content"].strip()
+            logger.info(f"[CHAT] Katyusha: {answer[:80]}")
+
+            # Push jawaban ke API
+            _req.post(
+                f"http://localhost:{port}/api/chat/answer",
+                json={"answer": answer},
+                timeout=3,
+            )
+
+            # Juga push ke sesi chat grup kalau ada
+            if self._session_id:
+                self._push("katyusha", "Katyusha", answer, 5)
+
+        except Exception as e:
+            logger.warning(f"[CHAT] Error handling user chat: {str(e)[:80]}")
+
     def _monitor_trades(self, raw_data: dict):
         """Cek trade yang sedang berjalan. Kalau ada yang close, proses debrief."""
         closed = self.executor.get_closed_trades()
@@ -642,7 +735,10 @@ class BotCore:
                 elif self._phase == "entry_sniper":
                     self._run_entry_sniper(raw)
 
-                # 4. Monitor trade aktif
+                # 4. Cek pesan user untuk Katyusha
+                self._handle_user_chat(raw)
+
+                # 5. Monitor trade aktif
                 self._monitor_trades(raw)
 
                 # 5. Update watchlist ke API

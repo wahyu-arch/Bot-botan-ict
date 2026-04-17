@@ -237,6 +237,76 @@ def get_stats():
     })
 
 
+# ── User Chat dengan Katyusha ──────────────────────────
+_user_chat: list = []   # history chat user ↔ Katyusha
+
+def get_user_chat() -> list:
+    return _user_chat
+
+def push_user_chat(role: str, content_text: str):
+    """role: 'user' atau 'katyusha'"""
+    global _user_chat
+    _user_chat.append({
+        "role": role,
+        "content": content_text,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    _user_chat = _user_chat[-100:]  # max 100 pesan
+
+
+@app.route("/api/chat", methods=["GET"])
+def get_chat():
+    return jsonify(_user_chat)
+
+
+@app.route("/api/chat", methods=["POST"])
+def post_chat():
+    """User kirim pesan ke Katyusha."""
+    from flask import request as freq
+    data = freq.get_json(silent=True) or {}
+    msg = data.get("message", "").strip()
+    if not msg:
+        return jsonify({"error": "message kosong"}), 400
+    push_user_chat("user", msg)
+    # Bot core akan poll /api/chat/pending dan proses
+    return jsonify({"status": "sent", "message": msg})
+
+
+@app.route("/api/chat/pending")
+def get_pending():
+    """Bot poll ini untuk ambil pesan user yang belum dibalas."""
+    unanswered = [m for m in _user_chat if m["role"] == "user" and not m.get("answered")]
+    return jsonify(unanswered)
+
+
+@app.route("/api/chat/answer", methods=["POST"])
+def post_answer():
+    """Bot push jawaban Katyusha."""
+    from flask import request as freq
+    data = freq.get_json(silent=True) or {}
+    answer = data.get("answer", "").strip()
+    # Mark semua user messages sebagai answered
+    for m in _user_chat:
+        if m["role"] == "user":
+            m["answered"] = True
+    push_user_chat("katyusha", answer)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/balance")
+def get_balance():
+    """Saldo Bybit dari trade_executor."""
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from trade_executor import TradeExecutor
+        executor = TradeExecutor(paper_mode=os.getenv("PAPER_TRADING","true").lower()=="true")
+        balance = executor.get_account_balance()
+        return jsonify({"balance_usdt": balance, "symbol": os.getenv("TRADING_SYMBOL","BTCUSDT")})
+    except Exception as e:
+        return jsonify({"error": str(e)[:100]}), 500
+
+
 @app.route("/api/watchlist")
 def get_watchlist():
     """Watchlist level aktif."""
