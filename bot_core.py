@@ -26,7 +26,8 @@ from groq import Groq
 from data_provider import DataProvider
 from ai_analysts import (
     hiura_h1_analysis, senanan_idm_hunt,
-    shina_bos_mss, yusuf_entry, loss_debrief
+    shina_bos_mss, yusuf_entry, loss_debrief,
+    katyusha_review, katyusha_post_trade
 )
 from watchlist_engine import WatchlistEngine
 from rules_engine import RulesEngine
@@ -92,6 +93,9 @@ class BotCore:
         self.scan_interval = scan_sec
         self.symbol = symbol
         self.paper  = paper
+        self._katyusha_key      = os.environ.get("OPENROUTER_API_KEY", "")
+        self._last_katyusha_ts  = 0.0   # timestamp review terakhir
+        self._katyusha_interval = 5 * 3600  # 5 jam dalam detik
 
         # State
         self._phase         = "h1_scan"
@@ -427,6 +431,51 @@ class BotCore:
                     self.logic.ai_update_on_loss(
                         self.client_main, self.model_json, trade, debrief
                     )
+
+                    # Katyusha post-trade evaluasi (lebih dalam dari Groq)
+                    if self._katyusha_key:
+                        k_post = katyusha_post_trade(
+                            self._katyusha_key, trade,
+                            {"hiura": self._hiura_data,
+                             "senanan": self._senanan_data,
+                             "shina": self._shina_data},
+                            debrief,
+                            self.rules.rules, self.logic.rules,
+                        )
+                        # Push ke chat
+                        if k_post.get("chat_msg"):
+                            sid_k = self._session_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_katyusha"
+                            if not self._session_id:
+                                api_server.start_session(sid_k, trade, "KATYUSHA EVALUATION")
+                                self._session_id = sid_k
+                            self._push("katyusha", "Katyusha", k_post.get("chat_msg",""), 5)
+
+                        # Apply rules changes dari Katyusha langsung
+                        for change in k_post.get("rules_changes", []):
+                            section = change.get("section","")
+                            key     = change.get("key","")
+                            val     = change.get("new")
+                            if section and key and val is not None and section in self.rules.rules:
+                                self.rules.rules[section][key] = val
+                                logger.info(f"[KATYUSHA] Rules override: {section}.{key} = {val}")
+                        if k_post.get("rules_changes"):
+                            self.rules.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')[:80]}"
+                            self.rules.rules["_version"] = self.rules.rules.get("_version",1) + 1
+                            self.rules._save(self.rules.rules)
+
+                        # Apply logic changes dari Katyusha
+                        for change in k_post.get("logic_changes", []):
+                            section = change.get("section","")
+                            key     = change.get("key","")
+                            val     = change.get("new")
+                            if section and key and val is not None and section in self.logic.rules:
+                                if isinstance(self.logic.rules[section], dict):
+                                    self.logic.rules[section][key] = val
+                                    logger.info(f"[KATYUSHA] Logic override: {section}.{key} = {val}")
+                        if k_post.get("logic_changes"):
+                            self.logic.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')[:80]}"
+                            self.logic.rules["_version"] = self.logic.rules.get("_version",1) + 1
+                            self.logic._save(self.logic.rules)
                 except Exception as e:
                     logger.error(f"[DEBRIEF ERROR] {e}")
 
@@ -454,7 +503,45 @@ class BotCore:
                     for t in triggered:
                         logger.info(f"[TRIGGER] {t['condition'].upper()} @ {t['level']:.2f} | {t['reason'][:60]}")
 
-                # 3. Dispatch ke fase yang tepat
+                # 3. Katyusha review setiap 5 jam
+                import time as _time
+                now_ts = _time.time()
+                if (self._katyusha_key and
+                        now_ts - self._last_katyusha_ts >= self._katyusha_interval and
+                        self._phase != "h1_scan"):
+                    self._last_katyusha_ts = now_ts
+                    logger.info("[KATYUSHA] Waktunya review 5 jam...")
+                    bot_state = {
+                        "phase":     self._phase,
+                        "watchlist": self.watchlist.to_api_dict(),
+                    }
+                    k_result = katyusha_review(
+                        self._katyusha_key, bot_state, raw,
+                        {"hiura": self._hiura_data,
+                         "senanan": self._senanan_data,
+                         "shina": self._shina_data}
+                    )
+                    msg = k_result.get("chat_msg", "")
+                    if msg:
+                        self._push("katyusha", "Katyusha", msg, 5)
+
+                    action = k_result.get("override_action", "none")
+                    if action == "reset":
+                        logger.info(f"[KATYUSHA] OVERRIDE: reset | {k_result.get('reasoning','')}")
+                        self._last_bos_lvl = 0.0
+                        self._reset("katyusha_override_reset")
+                    elif action == "force_phase":
+                        new_phase = k_result.get("override_phase", "")
+                        if new_phase:
+                            logger.info(f"[KATYUSHA] OVERRIDE: force_phase → {new_phase}")
+                            self._phase = new_phase
+                    elif action == "skip_entry":
+                        logger.info("[KATYUSHA] OVERRIDE: skip_entry")
+                        self._reset("katyusha_skip_entry")
+                    elif k_result.get("verdict") == "warning":
+                        logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}")
+
+                # 4. Dispatch ke fase yang tepat
                 if self._phase == "h1_scan":
                     self._run_h1_scan(raw)
 

@@ -435,3 +435,186 @@ Balas JSON murni:
     })
 
     return {**verdicts, **rc, "chat_log": chat_log}
+
+
+# ══════════════════════════════════════════════════════════
+# KATYUSHA — Supervisor via OpenRouter (Claude Sonnet)
+# Pantau setiap 5 jam + evaluasi setelah trade
+# Authority: langsung override tanpa tanya ulang
+# ══════════════════════════════════════════════════════════
+
+def katyusha_review(openrouter_key: str, bot_state: dict,
+                    raw_data: dict, all_ai_data: dict) -> dict:
+    """
+    Katyusha review kondisi market + apa yang sedang dilakukan AI lain.
+    Jika ada kesalahan → langsung override (reset/lanjut/skip/koreksi level).
+
+    Return: {
+      "verdict": "ok|override|reset|warning",
+      "override_action": "reset|skip_entry|force_phase|none",
+      "override_phase": "",
+      "corrections": {},
+      "chat_msg": "...",
+      "reasoning": "..."
+    }
+    """
+    import requests
+
+    phase      = bot_state.get("phase", "unknown")
+    price      = raw_data.get("price", 0)
+    h1_table   = _candle_table(raw_data.get("h1", []), limit=30)
+    m5_table   = _candle_table(raw_data.get("m5", []), limit=20)
+
+    hiura_sum  = json.dumps(all_ai_data.get("hiura", {}),  ensure_ascii=False)[:400]
+    senanan_sum= json.dumps(all_ai_data.get("senanan", {}),ensure_ascii=False)[:300]
+    shina_sum  = json.dumps(all_ai_data.get("shina", {}),  ensure_ascii=False)[:300]
+
+    watchlist_text = "\n".join([
+        f"  {w.get('condition','touch').upper()} @ {w.get('level',0):.2f} — {w.get('reason','')[:60]}"
+        for w in bot_state.get("watchlist", [])
+    ]) or "  (kosong)"
+
+    prompt = f"""Kamu adalah Katyusha, supervisor trading ICT dengan authority penuh.
+Kamu menggunakan Claude Sonnet — reasoning lebih kuat dari AI lain di tim.
+Harga sekarang: {price}
+Fase bot saat ini: {phase}
+
+CANDLE H1 (terbaru di bawah):
+{h1_table}
+
+CANDLE M5:
+{m5_table}
+
+ANALISIS AI SAAT INI:
+Hiura (H1): {hiura_sum}
+Senanan (IDM): {senanan_sum}
+Shina (BOS/MSS): {shina_sum}
+
+WATCHLIST AKTIF:
+{watchlist_text}
+
+TUGASMU:
+1. Cek apakah analisis AI lain sudah benar berdasarkan data candle
+2. Cek apakah fase bot sudah tepat
+3. Cek apakah watchlist level masuk akal
+4. Jika ada kesalahan → langsung override
+
+Kriteria override:
+- BOS yang diklaim tidak ada di data candle → reset ke h1_scan
+- FVG/IDM di level yang tidak ada di candle → koreksi level atau reset
+- Fase tidak sesuai kondisi market → force_phase ke fase yang benar
+- Market sudah berubah drastis sejak analisis terakhir → reset
+
+Jika semua OK → verdict = "ok"
+
+Balas JSON murni:
+{{
+  "verdict": "ok|override|warning",
+  "override_action": "none|reset|skip_entry|force_phase",
+  "override_phase": "",
+  "corrections": {{}},
+  "market_assessment": "ringkasan kondisi market saat ini (1-2 kalimat)",
+  "chat_msg": "pesan ke grup WA max 3 kalimat — gaya supervisor yang tegas",
+  "reasoning": "alasan keputusan (max 100 kata)"
+}}"""
+
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openrouter_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://bot-botan-ict.railway.app",
+                "X-Title": "ICT Trading Bot",
+            },
+            json={
+                "model": "anthropic/claude-sonnet-4-5",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "max_tokens": 600,
+            },
+            timeout=30,
+        )
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        parsed = _parse_json(raw)
+        if not parsed:
+            logger.warning(f"[KATYUSHA] Parse gagal: {raw[:100]}")
+            return {"verdict": "ok", "override_action": "none", "chat_msg": "", "reasoning": "parse error"}
+
+        logger.info(f"[KATYUSHA] verdict={parsed.get('verdict')} action={parsed.get('override_action')}")
+        return parsed
+
+    except Exception as e:
+        logger.warning(f"[KATYUSHA] Error: {str(e)[:80]}")
+        return {"verdict": "ok", "override_action": "none", "chat_msg": "", "reasoning": str(e)[:80]}
+
+
+def katyusha_post_trade(openrouter_key: str, closed_trade: dict,
+                        all_ai_data: dict, debrief: dict,
+                        rules_current: dict, logic_current: dict) -> dict:
+    """
+    Katyusha evaluasi mendalam setelah trade selesai.
+    Output: apakah rules/logic perlu diubah + rekomendasi spesifik.
+    """
+    import requests
+
+    prompt = f"""Kamu adalah Katyusha, supervisor trading ICT.
+Trade yang baru selesai:
+{json.dumps(closed_trade, ensure_ascii=False)[:300]}
+
+Debrief dari tim AI:
+Culprit: {debrief.get('culprit','')}
+Root cause: {debrief.get('root_cause','')}
+New rule suggested: {debrief.get('new_rule','')}
+
+Rules saat ini (ringkasan):
+{json.dumps({k:v for k,v in rules_current.items() if not k.startswith('_')}, ensure_ascii=False)[:400]}
+
+Logic saat ini (ringkasan):
+{json.dumps({k:v for k,v in logic_current.items() if not k.startswith('_')}, ensure_ascii=False)[:400]}
+
+TUGASMU:
+Berikan evaluasi mendalam:
+1. Apakah debrief tim sudah tepat menunjuk culprit?
+2. Rules/logic mana yang HARUS diubah?
+3. Berikan rekomendasi perubahan yang KONKRET (section + key + value baru)
+
+Balas JSON murni:
+{{
+  "agree_with_debrief": true,
+  "real_culprit": "Hiura|Senanan|Shina|Yusuf|sistem",
+  "rules_changes": [
+    {{"section": "entry", "key": "min_confidence", "old": 0.6, "new": 0.7, "reason": "..."}}
+  ],
+  "logic_changes": [
+    {{"section": "find_idm_m5", "key": "gap_min_candles", "old": 1, "new": 2, "reason": "..."}}
+  ],
+  "chat_msg": "pesan ke grup evaluasi (2-3 kalimat tegas)",
+  "summary": "ringkasan evaluasi Katyusha"
+}}"""
+
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openrouter_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://bot-botan-ict.railway.app",
+            },
+            json={
+                "model": "anthropic/claude-sonnet-4-5",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.15,
+                "max_tokens": 700,
+            },
+            timeout=30,
+        )
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        parsed = _parse_json(raw)
+        if not parsed:
+            return {"agree_with_debrief": True, "rules_changes": [], "logic_changes": [], "chat_msg": ""}
+        logger.info(f"[KATYUSHA POST] culprit={parsed.get('real_culprit')} changes={len(parsed.get('rules_changes',[]))+len(parsed.get('logic_changes',[]))}")
+        return parsed
+    except Exception as e:
+        logger.warning(f"[KATYUSHA POST] Error: {str(e)[:80]}")
+        return {"agree_with_debrief": True, "rules_changes": [], "logic_changes": [], "chat_msg": ""}
