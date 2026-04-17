@@ -444,78 +444,116 @@ Balas JSON murni:
 # ══════════════════════════════════════════════════════════
 
 def katyusha_review(openrouter_key: str, bot_state: dict,
-                    raw_data: dict, all_ai_data: dict) -> dict:
+                    raw_data: dict, all_ai_data: dict,
+                    rules_current: dict = None,
+                    logic_current: dict = None) -> dict:
     """
-    Katyusha review kondisi market + apa yang sedang dilakukan AI lain.
-    Jika ada kesalahan → langsung override (reset/lanjut/skip/koreksi level).
+    Katyusha review market + analisis AI + rules + logic.
+    Authority penuh: bisa edit/tambah/hapus rules dan logic langsung.
 
     Return: {
-      "verdict": "ok|override|reset|warning",
-      "override_action": "reset|skip_entry|force_phase|none",
+      "verdict": "ok|override|warning",
+      "override_action": "none|reset|skip_entry|force_phase",
       "override_phase": "",
-      "corrections": {},
+      "rules_changes": [...],
+      "rules_adds": [...],
+      "rules_removes": [...],
+      "logic_changes": [...],
+      "logic_adds": [...],
+      "logic_removes": [...],
       "chat_msg": "...",
       "reasoning": "..."
     }
     """
     import requests
 
-    phase      = bot_state.get("phase", "unknown")
-    price      = raw_data.get("price", 0)
-    h1_table   = _candle_table(raw_data.get("h1", []), limit=30)
-    m5_table   = _candle_table(raw_data.get("m5", []), limit=20)
+    phase   = bot_state.get("phase", "unknown")
+    price   = raw_data.get("price", 0)
+    h1_table = _candle_table(raw_data.get("h1", []), limit=30)
+    m5_table = _candle_table(raw_data.get("m5", []), limit=20)
 
-    hiura_sum  = json.dumps(all_ai_data.get("hiura", {}),  ensure_ascii=False)[:400]
-    senanan_sum= json.dumps(all_ai_data.get("senanan", {}),ensure_ascii=False)[:300]
-    shina_sum  = json.dumps(all_ai_data.get("shina", {}),  ensure_ascii=False)[:300]
+    hiura_sum   = json.dumps(all_ai_data.get("hiura",   {}), ensure_ascii=False)[:400]
+    senanan_sum = json.dumps(all_ai_data.get("senanan", {}), ensure_ascii=False)[:300]
+    shina_sum   = json.dumps(all_ai_data.get("shina",   {}), ensure_ascii=False)[:300]
 
     watchlist_text = "\n".join([
         f"  {w.get('condition','touch').upper()} @ {w.get('level',0):.2f} — {w.get('reason','')[:60]}"
         for w in bot_state.get("watchlist", [])
     ]) or "  (kosong)"
 
-    prompt = f"""Kamu adalah Katyusha, supervisor trading ICT dengan authority penuh.
-Kamu menggunakan Claude Sonnet — reasoning lebih kuat dari AI lain di tim.
-Harga sekarang: {price}
-Fase bot saat ini: {phase}
+    rules_text = json.dumps(
+        {k:v for k,v in (rules_current or {}).items() if not k.startswith("_")},
+        ensure_ascii=False, indent=2
+    )[:800]
 
-CANDLE H1 (terbaru di bawah):
+    logic_text = json.dumps(
+        {k:v for k,v in (logic_current or {}).items() if not k.startswith("_")},
+        ensure_ascii=False, indent=2
+    )[:800]
+
+    prompt = f"""Kamu adalah Katyusha, supervisor ICT trading bot dengan authority penuh.
+Kamu pakai Claude Sonnet — reasoning kamu lebih kuat dari AI Groq lain di tim.
+Harga sekarang: {price} | Fase: {phase}
+
+CANDLE H1 (closed, terbaru di bawah):
 {h1_table}
 
 CANDLE M5:
 {m5_table}
 
 ANALISIS AI SAAT INI:
-Hiura (H1): {hiura_sum}
-Senanan (IDM): {senanan_sum}
-Shina (BOS/MSS): {shina_sum}
+Hiura (H1 analyst): {hiura_sum}
+Senanan (IDM hunter): {senanan_sum}
+Shina (BOS/MSS guard): {shina_sum}
 
 WATCHLIST AKTIF:
 {watchlist_text}
 
-TUGASMU:
-1. Cek apakah analisis AI lain sudah benar berdasarkan data candle
-2. Cek apakah fase bot sudah tepat
-3. Cek apakah watchlist level masuk akal
-4. Jika ada kesalahan → langsung override
+RULES SAAT INI (parameter angka):
+{rules_text}
 
-Kriteria override:
-- BOS yang diklaim tidak ada di data candle → reset ke h1_scan
-- FVG/IDM di level yang tidak ada di candle → koreksi level atau reset
-- Fase tidak sesuai kondisi market → force_phase ke fase yang benar
-- Market sudah berubah drastis sejak analisis terakhir → reset
+LOGIC SAAT INI (cara kerja/kondisi):
+{logic_text}
 
-Jika semua OK → verdict = "ok"
+TUGASMU — cek semua secara menyeluruh:
+
+1. VALIDASI ANALISIS AI:
+   - Apakah BOS yang diklaim Hiura benar ada di candle? Cek level vs data candle
+   - Apakah IDM Senanan masuk akal? Level IDM ada di data candle?
+   - Apakah decision Shina konsisten dengan data?
+   - Apakah watchlist level realistis vs harga sekarang?
+
+2. VALIDASI RULES & LOGIC:
+   - Apakah ada rules yang terlalu ketat/longgar untuk kondisi market saat ini?
+   - Apakah logic (cara deteksi BOS/FVG/IDM) perlu penyesuaian?
+   - Apakah ada rules/logic yang missing dan seharusnya ada?
+
+3. TINDAKAN:
+   - Kalau analisis AI salah → override (reset/force_phase/skip)
+   - Kalau rules/logic perlu perbaikan → edit langsung sekarang
+   - Bisa tambah rules baru, ubah yang ada, atau hapus yang tidak perlu
+   - Kalau semua OK → verdict = "ok"
+
+FORMAT PERUBAHAN:
+- rules_changes: ubah nilai yang ada. Format: [{{"section":"entry","key":"min_confidence","new":0.7,"reason":"..."}}]
+- rules_adds: tambah key baru. Format: [{{"section":"entry","key":"require_fvg","value":true,"reason":"..."}}]
+- rules_removes: hapus key. Format: [{{"section":"filter","key":"skip_if_ranging","reason":"..."}}]
+- Sama untuk logic_changes, logic_adds, logic_removes
 
 Balas JSON murni:
 {{
   "verdict": "ok|override|warning",
   "override_action": "none|reset|skip_entry|force_phase",
   "override_phase": "",
-  "corrections": {{}},
-  "market_assessment": "ringkasan kondisi market saat ini (1-2 kalimat)",
-  "chat_msg": "pesan ke grup WA max 3 kalimat — gaya supervisor yang tegas",
-  "reasoning": "alasan keputusan (max 100 kata)"
+  "rules_changes": [],
+  "rules_adds": [],
+  "rules_removes": [],
+  "logic_changes": [],
+  "logic_adds": [],
+  "logic_removes": [],
+  "market_assessment": "kondisi market sekarang (1-2 kalimat)",
+  "chat_msg": "pesan ke grup WA max 3 kalimat — tegas dan informatif",
+  "reasoning": "penjelasan keputusan (max 120 kata)"
 }}"""
 
     try:
@@ -530,23 +568,35 @@ Balas JSON murni:
             json={
                 "model": "anthropic/claude-sonnet-4-5",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
-                "max_tokens": 600,
+                "temperature": 0.15,
+                "max_tokens": 900,
             },
-            timeout=30,
+            timeout=35,
         )
         raw = resp.json()["choices"][0]["message"]["content"].strip()
         parsed = _parse_json(raw)
         if not parsed:
             logger.warning(f"[KATYUSHA] Parse gagal: {raw[:100]}")
-            return {"verdict": "ok", "override_action": "none", "chat_msg": "", "reasoning": "parse error"}
+            return {"verdict": "ok", "override_action": "none", "chat_msg": "",
+                    "rules_changes": [], "rules_adds": [], "rules_removes": [],
+                    "logic_changes": [], "logic_adds": [], "logic_removes": []}
 
-        logger.info(f"[KATYUSHA] verdict={parsed.get('verdict')} action={parsed.get('override_action')}")
+        total_changes = (len(parsed.get("rules_changes",[])) +
+                         len(parsed.get("rules_adds",[])) +
+                         len(parsed.get("rules_removes",[])) +
+                         len(parsed.get("logic_changes",[])) +
+                         len(parsed.get("logic_adds",[])) +
+                         len(parsed.get("logic_removes",[])))
+        logger.info(f"[KATYUSHA] verdict={parsed.get('verdict')} "
+                    f"action={parsed.get('override_action')} "
+                    f"changes={total_changes}")
         return parsed
 
     except Exception as e:
         logger.warning(f"[KATYUSHA] Error: {str(e)[:80]}")
-        return {"verdict": "ok", "override_action": "none", "chat_msg": "", "reasoning": str(e)[:80]}
+        return {"verdict": "ok", "override_action": "none", "chat_msg": "",
+                "rules_changes": [], "rules_adds": [], "rules_removes": [],
+                "logic_changes": [], "logic_adds": [], "logic_removes": []}
 
 
 def katyusha_post_trade(openrouter_key: str, closed_trade: dict,

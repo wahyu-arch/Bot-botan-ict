@@ -144,6 +144,88 @@ class BotCore:
 
     # ── Phase Handlers ───────────────────────────────────
 
+    def _katyusha_apply_changes(self, k_result: dict):
+        """Apply semua perubahan rules dan logic dari Katyusha."""
+        rules = self.rules.rules
+        logic = self.logic.rules
+        rules_dirty = False
+        logic_dirty = False
+
+        # RULES: changes (ubah nilai)
+        for ch in k_result.get("rules_changes", []):
+            sec, key, val = ch.get("section",""), ch.get("key",""), ch.get("new")
+            if sec and key and val is not None:
+                if sec not in rules:
+                    rules[sec] = {}
+                old_val = rules[sec].get(key, "N/A")
+                rules[sec][key] = val
+                rules_dirty = True
+                logger.info(f"[KATYUSHA] rules CHANGE: {sec}.{key}: {old_val} → {val} | {ch.get('reason','')[:60]}")
+
+        # RULES: adds (tambah key baru)
+        for ch in k_result.get("rules_adds", []):
+            sec, key, val = ch.get("section",""), ch.get("key",""), ch.get("value")
+            if sec and key and val is not None:
+                if sec not in rules:
+                    rules[sec] = {}
+                rules[sec][key] = val
+                rules_dirty = True
+                logger.info(f"[KATYUSHA] rules ADD: {sec}.{key} = {val} | {ch.get('reason','')[:60]}")
+
+        # RULES: removes (hapus key)
+        for ch in k_result.get("rules_removes", []):
+            sec, key = ch.get("section",""), ch.get("key","")
+            if sec and key and sec in rules and key in rules[sec]:
+                del rules[sec][key]
+                rules_dirty = True
+                logger.info(f"[KATYUSHA] rules REMOVE: {sec}.{key} | {ch.get('reason','')[:60]}")
+
+        if rules_dirty:
+            rules["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            rules["_version"] = rules.get("_version", 1) + 1
+            self.rules._save(rules)
+            logger.info(f"[KATYUSHA] rules.json saved v{rules['_version']}")
+
+        # LOGIC: changes
+        for ch in k_result.get("logic_changes", []):
+            sec, key, val = ch.get("section",""), ch.get("key",""), ch.get("new")
+            if sec and key and val is not None and sec in logic:
+                if isinstance(logic[sec], dict):
+                    old_val = logic[sec].get(key, "N/A")
+                    logic[sec][key] = val
+                    logic_dirty = True
+                    logger.info(f"[KATYUSHA] logic CHANGE: {sec}.{key}: {old_val} → {val} | {ch.get('reason','')[:60]}")
+
+        # LOGIC: adds
+        for ch in k_result.get("logic_adds", []):
+            sec, key, val = ch.get("section",""), ch.get("key",""), ch.get("value")
+            if sec and key and val is not None:
+                if sec not in logic:
+                    logic[sec] = {}
+                logic[sec][key] = val
+                logic_dirty = True
+                logger.info(f"[KATYUSHA] logic ADD: {sec}.{key} = {val} | {ch.get('reason','')[:60]}")
+
+        # LOGIC: removes
+        for ch in k_result.get("logic_removes", []):
+            sec, key = ch.get("section",""), ch.get("key","")
+            if sec and key and sec in logic and isinstance(logic.get(sec), dict) and key in logic[sec]:
+                del logic[sec][key]
+                logic_dirty = True
+                logger.info(f"[KATYUSHA] logic REMOVE: {sec}.{key} | {ch.get('reason','')[:60]}")
+
+        if logic_dirty:
+            logic["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            logic["_version"] = logic.get("_version", 1) + 1
+            self.logic._save(logic)
+            logger.info(f"[KATYUSHA] logic_rules.json saved v{logic['_version']}")
+
+        total = (len(k_result.get("rules_changes",[])) + len(k_result.get("rules_adds",[])) +
+                 len(k_result.get("rules_removes",[])) + len(k_result.get("logic_changes",[])) +
+                 len(k_result.get("logic_adds",[])) + len(k_result.get("logic_removes",[])))
+        if total > 0:
+            logger.info(f"[KATYUSHA] Total {total} perubahan diterapkan")
+
     def _run_h1_scan(self, raw_data: dict):
         """Hiura analisis H1 setiap siklus. Buat sesi baru hanya saat BOS baru."""
         self.rules.reload()
@@ -519,12 +601,18 @@ class BotCore:
                         self._katyusha_key, bot_state, raw,
                         {"hiura": self._hiura_data,
                          "senanan": self._senanan_data,
-                         "shina": self._shina_data}
+                         "shina": self._shina_data},
+                        rules_current=self.rules.rules,
+                        logic_current=self.logic.rules,
                     )
                     msg = k_result.get("chat_msg", "")
                     if msg:
                         self._push("katyusha", "Katyusha", msg, 5)
 
+                    # Apply rules/logic edits dari Katyusha
+                    self._katyusha_apply_changes(k_result)
+
+                    # Override bot state
                     action = k_result.get("override_action", "none")
                     if action == "reset":
                         logger.info(f"[KATYUSHA] OVERRIDE: reset | {k_result.get('reasoning','')}")
@@ -539,7 +627,7 @@ class BotCore:
                         logger.info("[KATYUSHA] OVERRIDE: skip_entry")
                         self._reset("katyusha_skip_entry")
                     elif k_result.get("verdict") == "warning":
-                        logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}")
+                        logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}") 
 
                 # 4. Dispatch ke fase yang tepat
                 if self._phase == "h1_scan":
