@@ -1,0 +1,437 @@
+"""
+AI Analysts — 4 AI yang memutuskan semua analisis trading.
+
+Python hanya kasih data mentah (candle OHLC).
+AI yang memutuskan: ada BOS? FVG mana? IDM dimana? Entry di mana? SL/TP berapa?
+
+Hiura  (AI-1) → Analisis H1: BOS + FVG + tentukan range SH/SL
+Senanan (AI-2) → Analisis M5: IDM + set watchlist level
+Shina  (AI-3) → Setelah IDM disentuh: BOS atau MSS M5?
+Yusuf  (AI-4) → Entry presisi, SL, TP dari data yang terkumpul
+"""
+
+import json
+import logging
+import re
+from groq import Groq
+
+logger = logging.getLogger(__name__)
+
+
+# ── Helpers ─────────────────────────────────────────────
+
+def _call(client: Groq, model: str, prompt: str,
+          max_tokens: int = 500, temp: float = 0.3) -> str:
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temp,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        err = str(e)
+        tag = "[RATE LIMIT]" if ("429" in err or "rate_limit" in err.lower() or "413" in err) else "[API ERROR]"
+        logger.warning(f"{tag} {model}: {err[:100]}")
+        return ""
+
+
+def _parse_json(raw: str) -> dict | list | None:
+    if not raw:
+        return None
+    for attempt in [raw, re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw),
+                    re.search(r'(\{[\s\S]*\})', raw),
+                    re.search(r'(\[[\s\S]*\])', raw)]:
+        text = attempt.group(1) if hasattr(attempt, 'group') else attempt
+        if not text:
+            continue
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+    return None
+
+
+def _candle_table(candles: list, limit: int = 40) -> str:
+    """Format candle OHLC jadi teks ringkas."""
+    rows = []
+    for c in candles[-limit:]:
+        d = "↑" if c.get("bull") else "↓"
+        rows.append(f"[{c['i']:3}] {c.get('ts','')[-5:]} {d} H:{c['h']} L:{c['l']} C:{c['c']}")
+    return "\n".join(rows)
+
+
+# ══════════════════════════════════════════════════════════
+# HIURA (AI-1) — Analisis H1
+# Input: candle H1 mentah
+# Output: ada BOS? FVG mana? SH/SL berapa? Bias?
+# ══════════════════════════════════════════════════════════
+
+def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
+                      logic_context: str = "") -> dict:
+    """
+    Hiura analisis H1 dari data mentah.
+    Dia sendiri yang tentukan ada BOS atau tidak, FVG mana yang valid, range SH/SL.
+    """
+    h1_table = _candle_table(raw_data["h1"], limit=50)
+    price = raw_data["price"]
+
+    prompt = f"""Kamu adalah Hiura, analis struktur H1 ICT.
+Harga sekarang: {price}
+
+DATA CANDLE H1 (closed, terbaru di bawah):
+{h1_table}
+
+{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+
+TUGASMU — analisis berurutan:
+
+1. BIAS H1: lihat struktur swing high/low. Higher highs/lows = bullish. Lower highs/lows = bearish.
+
+2. BOS H1: apakah ada candle yang close-nya melewati swing high/low sebelumnya?
+   - BOS bullish: close > swing high terakhir yang signifikan
+   - BOS bearish: close < swing low terakhir yang signifikan
+   - Gunakan HARGA PERSIS dari data candle, jangan bulatkan
+
+3. FVG H1 (hanya sesuai arah BOS):
+   - FVG bullish: candle[i].H < candle[i+2].L (gap ke atas)
+   - FVG bearish: candle[i].L > candle[i+2].H (gap ke bawah)
+   - Cari max 3 FVG fresh (yang belum diisi harga)
+   - FVG harus SETELAH BOS terbentuk
+   - FVG diisi kalau candle close menembus zona (wick masuk = belum diisi)
+
+4. SWING RANGE: setelah BOS, tandai:
+   - SH = high tertinggi setelah BOS terbentuk (sebelum retrace)
+   - SL = swing low sebelum BOS (yang membentuk struktur)
+
+5. WATCHLIST: harga berapa yang harus dipantau?
+   - Untuk BOS bullish: FVG yang relevan untuk retrace (wick dari atas ke bawah)
+   - Harga persis dari candle data
+
+Balas JSON murni:
+{{
+  "bias": "bullish|bearish|neutral",
+  "bos_found": true,
+  "bos_type": "bullish_bos|bearish_bos",
+  "bos_level": 0.0,
+  "bos_candle_idx": 0,
+  "sh_since_bos": 0.0,
+  "sl_before_bos": 0.0,
+  "fvg_list": [
+    {{"type": "bullish|bearish", "high": 0.0, "low": 0.0, "candle_idx": 0, "fresh": true}}
+  ],
+  "watchlist": [
+    {{"level": 0.0, "condition": "touch", "reason": "FVG high/low @ X.XX"}}
+  ],
+  "chat_msg": "pesan ke grup WA max 2 kalimat",
+  "confidence": 0.0
+}}"""
+
+    raw = _call(client, model, prompt, max_tokens=600, temp=0.2)
+    parsed = _parse_json(raw)
+    if not parsed:
+        logger.warning(f"[HIURA] Parse gagal: {raw[:100]}")
+        return {"bias": "neutral", "bos_found": False, "watchlist": [],
+                "fvg_list": [], "chat_msg": "", "confidence": 0}
+
+    logger.info(f"[HIURA] bias={parsed.get('bias')} bos={parsed.get('bos_found')} "
+                f"bos_level={parsed.get('bos_level',0):.2f} fvg={len(parsed.get('fvg_list',[]))}")
+    return parsed
+
+
+# ══════════════════════════════════════════════════════════
+# SENANAN (AI-2) — IDM Hunter M5
+# Input: candle M5 mentah + range SH/SL dari Hiura
+# Output: IDM ditemukan? Level watchlist?
+# ══════════════════════════════════════════════════════════
+
+def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
+                     sh: float, sl: float, m5_idm_direction: str,
+                     bias_h1: str, logic_context: str = "") -> dict:
+    """
+    Senanan cari IDM di M5 dalam range SH-SL.
+    Dia sendiri yang tentukan IDM valid atau tidak.
+    """
+    m5_table = _candle_table(raw_data["m5"], limit=60)
+    price = raw_data["price"]
+
+    prompt = f"""Kamu adalah Senanan, spesialis IDM (Inducement) di M5 ICT.
+Harga sekarang: {price}
+Bias H1: {bias_h1}
+Range yang diberikan Hiura: SH={sh} SL={sl}
+Cari IDM arah: {m5_idm_direction} ({"bearish karena H1 bullish - M5 retrace turun" if m5_idm_direction == "bearish" else "bullish karena H1 bearish - M5 retrace naik"})
+
+DATA CANDLE M5 (closed, terbaru di bawah):
+{m5_table}
+
+{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+
+TUGASMU:
+Cari IDM {m5_idm_direction} di M5 dalam range harga {sl}–{sh}.
+
+DEFINISI IDM:
+- IDM {m5_idm_direction}: 
+  {"Candle A buat swing HIGH → minimal 1 candle tidak tembus high A (close maupun wick) → candle berikutnya TEMBUS high A → IDM terbentuk! Level watch = LOW candle A (karena harga akan retrace ke bawah sentuh low ini)" if m5_idm_direction == "bearish" else "Candle A buat swing LOW → minimal 1 candle tidak tembus low A → candle berikutnya TEMBUS low A → IDM terbentuk! Level watch = HIGH candle A"}
+
+- Cari dari candle terbaru (paling bawah tabel) ke atas
+- IDM harus dalam range harga {sl}–{sh}
+- Level watch (yang harus disentuh harga) = {"low candle A untuk IDM bearish" if m5_idm_direction == "bearish" else "high candle A untuk IDM bullish"}
+- Sentuh = wick atau body menyentuh level watch
+
+Jika tidak ada IDM dalam range, set idm_found=false.
+
+Balas JSON murni:
+{{
+  "idm_found": true,
+  "idm_type": "bullish_idm|bearish_idm",
+  "candle_a_idx": 0,
+  "candle_a_high": 0.0,
+  "candle_a_low": 0.0,
+  "watch_level": 0.0,
+  "watch_condition": "touch",
+  "watch_reason": "low/high candle A IDM @ X.XX",
+  "watchlist": [
+    {{"level": 0.0, "condition": "touch", "reason": "IDM watch level"}}
+  ],
+  "chat_msg": "pesan ke grup WA max 2 kalimat",
+  "confidence": 0.0
+}}"""
+
+    raw = _call(client, model, prompt, max_tokens=400, temp=0.2)
+    parsed = _parse_json(raw)
+    if not parsed:
+        logger.warning(f"[SENANAN] Parse gagal: {raw[:100]}")
+        return {"idm_found": False, "watchlist": [], "chat_msg": "", "confidence": 0}
+
+    logger.info(f"[SENANAN] idm={parsed.get('idm_found')} watch={parsed.get('watch_level',0):.2f}")
+    return parsed
+
+
+# ══════════════════════════════════════════════════════════
+# SHINA (AI-3) — BOS/MSS Guard M5
+# Input: candle M5 + konteks IDM yang disentuh
+# Output: BOS? MSS? Lanjut ke entry atau reset?
+# ══════════════════════════════════════════════════════════
+
+def shina_bos_mss(client: Groq, model: str, raw_data: dict,
+                  idm_info: dict, bias_h1: str,
+                  sh: float, sl: float) -> dict:
+    """
+    Shina analisis BOS/MSS di M5 setelah IDM disentuh.
+    Dia yang memutuskan lanjut ke entry atau cari IDM baru.
+    """
+    m5_table = _candle_table(raw_data["m5"], limit=40)
+    price = raw_data["price"]
+    watch_level = idm_info.get("watch_level", 0)
+    idm_type = idm_info.get("idm_type", "")
+
+    prompt = f"""Kamu adalah Shina, penjaga BOS/MSS M5 ICT.
+Harga sekarang: {price}
+Bias H1: {bias_h1}
+IDM M5 yang baru disentuh: {idm_type} @ watch level {watch_level}
+Range aktif: SH={sh} SL={sl}
+
+DATA CANDLE M5 (closed, terbaru di bawah):
+{m5_table}
+
+TUGASMU:
+Setelah IDM disentuh, cek apakah terjadi BOS atau MSS di M5.
+
+DEFINISI:
+- Freeze range = area dari candle IDM terbentuk sampai candle IDM disentuh
+  Freeze high = highest high dalam range itu
+  Freeze low  = lowest low dalam range itu
+
+Untuk bias H1 {bias_h1}:
+{"- BOS bearish M5: ada close CANDLE di bawah freeze low → lanjut ke entry sniper (tunggu MSS)" if bias_h1 == "bullish" else "- BOS bullish M5: ada close CANDLE di atas freeze high → lanjut ke entry sniper (tunggu MSS)"}
+{"- MSS bullish M5: setelah BOS bearish, ada close di ATAS freeze high → entry signal!" if bias_h1 == "bullish" else "- MSS bearish M5: setelah BOS bullish, ada close di BAWAH freeze low → entry signal!"}
+- Jika tidak ada BOS/MSS: keputusan = wait, set watchlist di freeze high/low
+
+Tentukan freeze range dari candle terbaru dan beri keputusan.
+
+Balas JSON murni:
+{{
+  "freeze_high": 0.0,
+  "freeze_low": 0.0,
+  "bos_found": false,
+  "bos_type": "bearish_bos_m5|bullish_bos_m5",
+  "mss_found": false,
+  "mss_type": "bullish_mss_m5|bearish_mss_m5",
+  "mss_candle_high": 0.0,
+  "mss_candle_low": 0.0,
+  "decision": "entry|wait|reset_idm",
+  "watchlist": [
+    {{"level": 0.0, "condition": "break_above|break_below|touch", "reason": "freeze high/low"}}
+  ],
+  "chat_msg": "pesan ke grup WA max 2 kalimat",
+  "confidence": 0.0
+}}"""
+
+    raw = _call(client, model, prompt, max_tokens=400, temp=0.2)
+    parsed = _parse_json(raw)
+    if not parsed:
+        logger.warning(f"[SHINA] Parse gagal: {raw[:100]}")
+        return {"decision": "wait", "watchlist": [], "mss_found": False,
+                "chat_msg": "", "confidence": 0}
+
+    logger.info(f"[SHINA] decision={parsed.get('decision')} mss={parsed.get('mss_found')} "
+                f"freeze={parsed.get('freeze_low',0):.2f}-{parsed.get('freeze_high',0):.2f}")
+    return parsed
+
+
+# ══════════════════════════════════════════════════════════
+# YUSUF (AI-4) — Entry Sniper
+# Input: semua konteks + FVG H1 + MSS candle
+# Output: entry price, SL, TP, confidence
+# ══════════════════════════════════════════════════════════
+
+def yusuf_entry(client: Groq, model: str, raw_data: dict,
+                hiura_data: dict, shina_data: dict,
+                trade_memory: list, logic_context: str = "") -> dict:
+    """
+    Yusuf tentukan entry, SL, TP.
+    Dia punya akses ke memory trade sebelumnya untuk belajar.
+    """
+    price = raw_data["price"]
+    bias = hiura_data.get("bias", "neutral")
+    fvg_list = hiura_data.get("fvg_list", [])
+    mss_high = shina_data.get("mss_candle_high", 0)
+    mss_low  = shina_data.get("mss_candle_low",  0)
+
+    fvg_text = "\n".join([
+        f"  FVG {f['type']}: {f['low']}–{f['high']}"
+        for f in fvg_list if f.get("fresh", True)
+    ]) or "  Tidak ada FVG fresh"
+
+    mem_text = ""
+    if trade_memory:
+        mem_text = "TRADE SEBELUMNYA (belajar dari ini):\n"
+        for t in trade_memory[-5:]:
+            mem_text += (f"  [{t.get('result','?')}] {t.get('direction','?')} "
+                        f"entry={t.get('entry',0)} setup={t.get('setup','?')} "
+                        f"notes={t.get('notes','')[:50]}\n")
+
+    prompt = f"""Kamu adalah Yusuf, entry sniper ICT.
+Harga sekarang: {price}
+Bias H1: {bias}
+MSS candle: High={mss_high} Low={mss_low}
+
+FVG H1 yang tersedia:
+{fvg_text}
+
+{mem_text}
+{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+
+TUGASMU:
+Tentukan entry paling presisi. Gunakan angka PERSIS dari data, jangan bulatkan.
+
+RULES ENTRY:
+- Entry HANYA kalau candle MSS berada di zona FVG H1
+- Bias bullish: entry limit di HIGH FVG (harga retest dari atas ke bawah, limit buy di sana)
+- Bias bearish: entry limit di LOW FVG
+- Jika MSS di luar FVG: skip entry, keputusan = skip
+
+RULES SL:
+- Bias bullish: SL = LOW candle MSS (bukan wick, body close)
+- Bias bearish: SL = HIGH candle MSS
+- Tambah buffer dari rules jika ada
+
+RULES TP:
+- Bias bullish: TP = swing high tertinggi sejak BOS H1 (liquidity di atas)
+- Bias bearish: TP = swing low terendah sejak BOS H1
+- Min RR = 2.0
+
+Balas JSON murni:
+{{
+  "decision": "entry|skip",
+  "skip_reason": "",
+  "direction": "buy|sell",
+  "entry": 0.0,
+  "sl": 0.0,
+  "tp": 0.0,
+  "rr": 0.0,
+  "setup_type": "MSS_in_FVG|skip",
+  "sl_reason": "low/high MSS candle @ X.XX",
+  "tp_reason": "liquidity pool @ X.XX",
+  "chat_msg": "pesan ke grup WA max 3 kalimat",
+  "confidence": 0.0
+}}"""
+
+    raw = _call(client, model, prompt, max_tokens=500, temp=0.15)
+    parsed = _parse_json(raw)
+    if not parsed:
+        logger.warning(f"[YUSUF] Parse gagal: {raw[:100]}")
+        return {"decision": "skip", "chat_msg": "", "confidence": 0,
+                "entry": 0, "sl": 0, "tp": 0}
+
+    logger.info(f"[YUSUF] decision={parsed.get('decision')} "
+                f"entry={parsed.get('entry',0):.2f} sl={parsed.get('sl',0):.2f} "
+                f"tp={parsed.get('tp',0):.2f} rr={parsed.get('rr',0):.1f} "
+                f"conf={parsed.get('confidence',0):.0%}")
+    return parsed
+
+
+# ══════════════════════════════════════════════════════════
+# LOSS DEBRIEF — semua AI evaluasi setelah loss
+# ══════════════════════════════════════════════════════════
+
+def loss_debrief(clients: list, models: list,
+                 closed_trade: dict, all_ai_data: dict) -> dict:
+    """4 AI evaluasi trade yang loss dari perspektif masing-masing."""
+
+    trade_str = (
+        f"Direction: {closed_trade.get('direction','?')} "
+        f"Entry: {closed_trade.get('entry',0):.2f} "
+        f"SL: {closed_trade.get('sl',0):.2f} "
+        f"Exit: {closed_trade.get('exit_price',0):.2f} "
+        f"PnL: {closed_trade.get('pnl',0):.4f}"
+    )
+
+    ai_info = [
+        ("Hiura",   "analisis H1 BOS dan FVG",       "Apakah BOS valid? FVG yang dipakai tepat?"),
+        ("Senanan", "IDM M5",                          "Apakah IDM valid? Level watch sudah benar?"),
+        ("Shina",   "BOS/MSS M5",                     "Apakah BOS/MSS keputusannya benar?"),
+        ("Yusuf",   "entry SL TP",                    "Apakah entry, SL, TP sudah di level yang benar?"),
+    ]
+
+    chat_log = []
+    verdicts = {}
+
+    for i, (name, role, question) in enumerate(ai_info):
+        if i >= len(clients):
+            break
+        prompt = f"""Kamu adalah {name}, spesialis {role}.
+Trade yang loss: {trade_str}
+Evaluasi: {question}
+2-3 kalimat jujur. Tidak perlu defensif. Gaya WA.
+Format: "{name}: [evaluasimu]" """
+
+        raw = _call(clients[i], models[i], prompt, max_tokens=180, temp=0.5)
+        verdicts[name.lower()] = raw
+        chat_log.append({"ai": f"ai{i+1}", "nama": name, "pesan": raw, "ronde": 1})
+        logger.info(f"[DEBRIEF {name}] {raw[:80]}")
+
+    # Root cause analysis
+    debrief_text = "\n".join([f"{k}: {v}" for k, v in verdicts.items()])
+    rc_prompt = f"""Berdasarkan evaluasi 4 AI setelah loss:
+{debrief_text}
+Trade: {trade_str}
+
+Identifikasi: siapa paling bertanggung jawab? root cause? rule baru apa yang harus diterapkan?
+Balas JSON murni:
+{{"culprit":"Hiura|Senanan|Shina|Yusuf","root_cause":"...","new_rule":"...","lesson":"..."}}"""
+
+    rc_raw = _call(clients[0], models[0], rc_prompt, max_tokens=250, temp=0.2)
+    rc = _parse_json(rc_raw) or {
+        "culprit": "unknown", "root_cause": "parse error",
+        "new_rule": "", "lesson": "review manual"
+    }
+
+    chat_log.append({
+        "ai": "system", "nama": "Debrief",
+        "pesan": f"Root cause: {rc.get('culprit')} — {rc.get('root_cause')} | Rule baru: {rc.get('new_rule')}",
+        "ronde": 2
+    })
+
+    return {**verdicts, **rc, "chat_log": chat_log}
