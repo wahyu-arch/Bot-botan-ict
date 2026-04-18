@@ -1,7 +1,7 @@
 {
-  "_version": 1,
+  "_version": 2,
   "_last_updated": null,
-  "_update_reason": "Initial logic rules — dari SNIPER V4",
+  "_update_reason": "v28→v29: entry tidak lagi wajib di FVG, FVG hanya zona referensi",
   "_update_count": 0,
 
   "find_bos_h1": {
@@ -25,7 +25,8 @@
     "body_break_invalid": true,
     "min_gap_pct": 0.05,
     "lookback": 20,
-    "comment": "FVG terbentuk dari gap candle 1 dan 3. Filter sesuai arah BOS. Wick touch valid, body break = invalid."
+    "role": "reference_zone_only",
+    "comment": "FVG H1 digunakan sebagai referensi zona saja — bukan filter wajib entry. Entry tetap valid di luar FVG jika MSS terkonfirmasi."
   },
 
   "find_idm_m5": {
@@ -66,16 +67,17 @@
     "bearish_mss": "close_below_freeze_low_after_bullish_bos",
     "on_mss": "proceed_to_entry",
     "on_opposite_break": "reset_idm_hunt",
-    "comment": "MSS M5: setelah BOS M5, IDM baru disentuh, harga break ke arah berlawanan = MSS."
+    "comment": "MSS M5: setelah BOS M5, IDM baru disentuh, harga break ke arah berlawanan = MSS. Entry langsung tanpa cek FVG."
   },
 
   "entry": {
-    "condition": "mss_candle_in_fvg_h1",
-    "long_price": "fvg_h1_top",
-    "short_price": "fvg_h1_bottom",
+    "condition": "mss_confirmed",
+    "fvg_role": "reference_only",
+    "long_price": "close_of_mss_candle_or_limit_near_mss",
+    "short_price": "close_of_mss_candle_or_limit_near_mss",
     "order_type": "limit",
-    "skip_if_outside_fvg": true,
-    "comment": "Entry hanya kalau candle MSS di zona FVG H1. Limit order di top/bottom FVG."
+    "skip_if_outside_fvg": false,
+    "comment": "Entry saat MSS terkonfirmasi. FVG hanya info tambahan untuk AI, bukan gate wajib."
   },
 
   "stop_loss": {
@@ -83,7 +85,7 @@
     "long_sl": "low_of_mss_candle",
     "short_sl": "high_of_mss_candle",
     "buffer_pct": 0.0,
-    "comment": "SL = low/high candle MSS. Buffer 0 secara default."
+    "comment": "SL = low/high candle MSS."
   },
 
   "take_profit": {
