@@ -48,7 +48,10 @@ logging.basicConfig(
 
 class BotCore:
     def __init__(self):
-        symbol      = os.getenv("TRADING_SYMBOL", "BTCUSDT")
+        # Multi-symbol: TRADING_SYMBOL bisa berupa "BTCUSDT,ETHUSDT,SOLUSDT"
+        symbols_raw = os.getenv("TRADING_SYMBOL", "BTCUSDT")
+        self.symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+        symbol = self.symbols[0]  # symbol utama untuk instance ini
         paper       = os.getenv("PAPER_TRADING", "true").lower() == "true"
         scan_sec    = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
 
@@ -108,7 +111,7 @@ class BotCore:
         self._senanan_data: dict = {}
         self._shina_data  : dict = {}
 
-        logger.info(f"BotCore ready | {symbol} | paper={paper}")
+        logger.info(f"BotCore ready | {symbol} | paper={paper} | symbols={self.symbols}")
         logger.info(f"Models: main={self.model_main} | ai1={self.model_ai1} | "
                     f"ai2={self.model_ai2} | ai3={self.model_ai3}")
 
@@ -241,13 +244,12 @@ class BotCore:
         bos_found = result.get("bos_found", False)
         msg       = result.get("chat_msg", "")
 
-        if bos_found and bos_level != self._last_bos_lvl:
-            # BOS baru → sesi baru
-            self._last_bos_lvl = bos_level
-            self._new_session(raw_data)
-            self._push("ai1", "Hiura", msg, 1)
+        # Hiura SELALU ke live feed — tidak pernah buat sesi baru
+        if msg:
+            api_server.push_live_msg("ai1", "Hiura", msg)
 
-            # Pasang watchlist dari Hiura
+        if bos_found and bos_level != self._last_bos_lvl:
+            self._last_bos_lvl = bos_level
             wl = result.get("watchlist", [])
             if wl:
                 self.watchlist.clear_untriggered()
@@ -257,24 +259,16 @@ class BotCore:
                         condition=item.get("condition", "touch"),
                         reason=item.get("reason", ""),
                         phase="fvg_wait",
-                        session_ref=self._session_id,
+                        session_ref="live",
                     )
                 self._phase = "fvg_wait"
                 logger.info(f"[HIURA] BOS {result.get('bos_type')} @ {bos_level:.2f} | "
                            f"{len(wl)} watchlist | Fase → fvg_wait")
             else:
                 logger.info(f"[HIURA] BOS {bos_level:.2f} tapi tidak ada FVG fresh")
-
         elif bos_found:
-            # BOS sama — push update ke sesi yang ada
-            if msg and self._session_id:
-                self._push("ai1", "Hiura", msg, 1)
-            logger.info(f"[HIURA] BOS sama @ {bos_level:.2f} — update sesi")
-
+            logger.info(f"[HIURA] BOS sama @ {bos_level:.2f}")
         else:
-            # Tidak ada BOS — live feed
-            if msg:
-                api_server.push_live_msg("ai1", "Hiura", msg)
             logger.info(f"[HIURA] Belum ada BOS | harga {raw_data.get('price')}")
 
     def _run_fvg_wait(self, raw_data: dict, triggered_items: list):
@@ -311,9 +305,16 @@ class BotCore:
             logger.info(f"[FVG WAIT] Harga {price:.2f} — tunggu FVG touch")
             return
 
-        # Ada watchlist yang disentuh → FVG kena
+        # Ada watchlist yang disentuh → FVG kena → mulai sesi diskusi
         item = triggered_items[-1]
-        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.2f} — panggil Senanan")
+        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.2f} — mulai sesi diskusi")
+
+        # SESI BARU dibuat di sini (bukan saat BOS)
+        self._new_session(raw_data)
+        # Kirim konteks Hiura ke sesi ini
+        hiura_msg = self._hiura_data.get("chat_msg", "")
+        if hiura_msg:
+            self._push("ai1", "Hiura", hiura_msg, 1)
 
         sh = self._hiura_data.get("sh_since_bos", 0)
         sl = self._hiura_data.get("sl_before_bos", 0)
@@ -749,7 +750,7 @@ Max 5 kalimat."""
                 self._monitor_trades(raw)
 
                 # 5. Update watchlist ke API
-                api_server.update_watchlist(self.watchlist.to_api_dict())
+                api_server.update_watchlist(self.watchlist.to_api_dict(), self.symbol)
 
                 self._prev_price = price
 

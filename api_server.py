@@ -19,10 +19,14 @@ _current_session = None  # session yang sedang berjalan
 _watchlist = []  # level watchlist aktif
 
 
-def update_watchlist(items: list):
-    """Update watchlist dari bot."""
-    global _watchlist
+_watchlist_by_symbol: dict = {}
+
+def update_watchlist(items: list, symbol: str = ""):
+    """Update watchlist dari bot, per symbol."""
+    global _watchlist, _watchlist_by_symbol
     _watchlist = items
+    if symbol:
+        _watchlist_by_symbol[symbol] = items
 
 
 def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str):
@@ -309,8 +313,33 @@ def get_balance():
 
 @app.route("/api/watchlist")
 def get_watchlist():
-    """Watchlist level aktif."""
+    """Watchlist level aktif — semua symbol digabung."""
+    if _watchlist_by_symbol:
+        all_items = []
+        for items in _watchlist_by_symbol.values():
+            all_items.extend(items)
+        return jsonify(all_items)
     return jsonify(_watchlist)
+
+
+@app.route("/api/watchlist/<symbol>")
+def get_watchlist_symbol(symbol):
+    """Watchlist untuk satu symbol spesifik."""
+    return jsonify(_watchlist_by_symbol.get(symbol.upper(), []))
+
+
+@app.route("/api/symbols")
+def get_symbols():
+    """Symbol aktif dan status watchlist-nya."""
+    import os
+    raw = os.getenv("TRADING_SYMBOLS", os.getenv("TRADING_SYMBOL", "BTCUSDT"))
+    symbols = [s.strip() for s in raw.split(",") if s.strip()]
+    status = {}
+    for sym in symbols:
+        wl = _watchlist_by_symbol.get(sym, [])
+        active = [w for w in wl if not w.get("triggered")]
+        status[sym] = {"watchlist_active": len(active), "total": len(wl)}
+    return jsonify({"symbols": symbols, "status": status})
 
 
 @app.route("/api/latest")

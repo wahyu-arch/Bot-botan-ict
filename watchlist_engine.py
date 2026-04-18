@@ -56,18 +56,19 @@ class WatchlistEngine:
         with open(WATCHLIST_FILE, "w") as f:
             json.dump(self.items, f, indent=2, ensure_ascii=False)
 
-    def add(self, level: float, condition: str, reason: str, phase: str, session_ref: str) -> dict:
+    def add(self, level: float, condition: str, reason: str, phase: str, session_ref: str, symbol: str = "") -> dict:
         """Tambah item watchlist baru."""
         item = {
             "id": f"wl_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
             "level": round(level, 2),
-            "condition": condition,       # "touch" | "break_above" | "break_below"
+            "condition": condition,
             "reason": reason,
-            "phase": phase,               # "waiting_bos" | "waiting_entry" | "waiting_retest"
+            "phase": phase,
             "triggered": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "triggered_at": None,
             "session_ref": session_ref,
+            "symbol": symbol,
         }
         self.items.append(item)
         self._save()
