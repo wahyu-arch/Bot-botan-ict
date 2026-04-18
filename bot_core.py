@@ -65,10 +65,10 @@ class BotCore:
         key_ai3 = os.environ.get("GROQ_API_KEY_AI3") or groq_key
 
         # Models
-        self.model_main = os.getenv("GROQ_MODEL_MAIN", "openai/gpt-oss-120b")
-        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "openai/gpt-oss-120b")
-        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "openai/gpt-oss-120b")
-        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "openai/gpt-oss-120b")
+        self.model_main = os.getenv("GROQ_MODEL_MAIN", "llama-3.3-70b-versatile")
+        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "llama-3.3-70b-versatile")
+        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "llama-3.3-70b-versatile")
+        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "llama-3.3-70b-versatile")
         self.model_json = os.getenv("GROQ_MODEL_JSON",  self.model_ai1)
 
         # Clients
