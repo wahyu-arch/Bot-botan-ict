@@ -317,7 +317,7 @@ Harga sekarang: {price}
 Bias H1: {bias}
 MSS candle: High={mss_high} Low={mss_low}
 
-FVG H1 yang tersedia:
+FVG H1 (hanya sebagai referensi zona, bukan syarat wajib):
 {fvg_text}
 
 {mem_text}
@@ -327,13 +327,14 @@ TUGASMU:
 Tentukan entry paling presisi. Gunakan angka PERSIS dari data, jangan bulatkan.
 
 RULES ENTRY:
-- Entry HANYA kalau candle MSS berada di zona FVG H1
-- Bias bullish: entry limit di HIGH FVG (harga retest dari atas ke bawah, limit buy di sana)
-- Bias bearish: entry limit di LOW FVG
-- Jika MSS di luar FVG: skip entry, keputusan = skip
+- Entry saat MSS M5 terkonfirmasi — FVG H1 hanya sebagai info tambahan, bukan gate wajib
+- MSS di dalam FVG = setup lebih kuat (naikkan confidence), tapi di luar FVG tetap valid
+- Bias bullish: entry limit di area MSS candle close atau sedikit di bawahnya
+- Bias bearish: entry limit di area MSS candle close atau sedikit di atasnya
+- Skip HANYA kalau MSS tidak terkonfirmasi atau RR < 2.0
 
 RULES SL:
-- Bias bullish: SL = LOW candle MSS (bukan wick, body close)
+- Bias bullish: SL = LOW candle MSS
 - Bias bearish: SL = HIGH candle MSS
 - Tambah buffer dari rules jika ada
 
@@ -351,7 +352,8 @@ Balas JSON murni:
   "sl": 0.0,
   "tp": 0.0,
   "rr": 0.0,
-  "setup_type": "MSS_in_FVG|skip",
+  "setup_type": "MSS_confirmed|MSS_in_FVG|MSS_outside_FVG|skip",
+  "in_fvg_zone": true,
   "sl_reason": "low/high MSS candle @ X.XX",
   "tp_reason": "liquidity pool @ X.XX",
   "chat_msg": "pesan ke grup WA max 3 kalimat",
@@ -566,7 +568,7 @@ Balas JSON murni:
                 "X-Title": "ICT Trading Bot",
             },
             json={
-                "model": "anthropic/claude-sonnet-4-5",
+                "model": "anthropic/claude-sonnet-4-6",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.15,
                 "max_tokens": 900,
@@ -652,7 +654,7 @@ Balas JSON murni:
                 "HTTP-Referer": "https://bot-botan-ict.railway.app",
             },
             json={
-                "model": "anthropic/claude-sonnet-4-5",
+                "model": "anthropic/claude-sonnet-4-6",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.15,
                 "max_tokens": 700,

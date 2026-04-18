@@ -419,6 +419,13 @@ class BotCore:
             if entry > 0 and sl > 0 and tp > 0 and conf >= min_conf:
                 direction = result.get("direction", "buy")
 
+                # Guard: pastikan AI tidak naikkan min_confidence melebihi batas atas
+                max_conf_allowed = self.rules.get("entry", "max_confidence_allowed", default=0.85)
+                if min_conf > max_conf_allowed:
+                    logger.warning(f"[YUSUF] min_confidence {min_conf:.0%} melebihi max_confidence_allowed {max_conf_allowed:.0%} — di-clamp")
+                    self.rules.rules.setdefault("entry", {})["min_confidence"] = max_conf_allowed
+                    self.rules._save(self.rules.rules)
+
                 # Sync balance
                 live_bal = self.executor.get_account_balance()
                 if live_bal > 0:
@@ -531,7 +538,7 @@ Max 5 kalimat."""
                     "HTTP-Referer": "https://bot-botan-ict.railway.app",
                 },
                 json={
-                    "model": "anthropic/claude-sonnet-4-5",
+                    "model": "anthropic/claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.4,
                     "max_tokens": 400,
