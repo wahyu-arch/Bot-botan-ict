@@ -206,7 +206,7 @@ class BotCore:
                 logger.info(f"[KATYUSHA] rules REMOVE: {sec}.{key} | {ch.get('reason','')[:60]}")
 
         if rules_dirty:
-            rules["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            rules["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')}"
             rules["_version"] = rules.get("_version", 1) + 1
             self.rules._save(rules)
             logger.info(f"[KATYUSHA] rules.json saved v{rules['_version']}")
@@ -240,7 +240,7 @@ class BotCore:
                 logger.info(f"[KATYUSHA] logic REMOVE: {sec}.{key} | {ch.get('reason','')[:60]}")
 
         if logic_dirty:
-            logic["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            logic["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')}"
             logic["_version"] = logic.get("_version", 1) + 1
             self.logic._save(logic)
             logger.info(f"[KATYUSHA] logic_rules.json saved v{logic['_version']}")
@@ -259,7 +259,7 @@ class BotCore:
                 logger.info(f"[KATYUSHA] prompt UPDATE: {ai_name}.{field}: '{old_val[:40]}' → '{str(value)[:40]}'")
 
         if prompts_dirty:
-            prompts["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            prompts["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')}"
             prompts["_version"] = prompts.get("_version", 1) + 1
             self.prompts.save(prompts)
             logger.info(f"[KATYUSHA] prompts.json saved v{prompts['_version']}")
@@ -697,7 +697,7 @@ Max 5 kalimat."""
                                 self.rules.rules[section][key] = val
                                 logger.info(f"[KATYUSHA] Rules override: {section}.{key} = {val}")
                         if k_post.get("rules_changes"):
-                            self.rules.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')[:80]}"
+                            self.rules.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')}"
                             self.rules.rules["_version"] = self.rules.rules.get("_version",1) + 1
                             self.rules._save(self.rules.rules)
 
@@ -711,7 +711,7 @@ Max 5 kalimat."""
                                     self.logic.rules[section][key] = val
                                     logger.info(f"[KATYUSHA] Logic override: {section}.{key} = {val}")
                         if k_post.get("logic_changes"):
-                            self.logic.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')[:80]}"
+                            self.logic.rules["_update_reason"] = f"Katyusha override: {k_post.get('summary','')}"
                             self.logic.rules["_version"] = self.logic.rules.get("_version",1) + 1
                             self.logic._save(self.logic.rules)
                 except Exception as e:
