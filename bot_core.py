@@ -47,10 +47,11 @@ logging.basicConfig(
 
 
 class BotCore:
-    def __init__(self):
-        symbols_raw = os.getenv("TRADING_SYMBOLS", os.getenv("TRADING_SYMBOL", "BTCUSDT"))
-        self.symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
-        symbol = self.symbols[0]  # symbol utama untuk instance ini
+    def __init__(self, symbol: str = ""):
+        # Symbol bisa di-pass langsung (multi-symbol mode) atau via env (single mode)
+        if not symbol:
+            symbol = os.getenv("TRADING_SYMBOL", "BTCUSDT").strip()
+        self.symbols = [symbol]  # untuk kompatibilitas
         paper       = os.getenv("PAPER_TRADING", "true").lower() == "true"
         scan_sec    = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
 

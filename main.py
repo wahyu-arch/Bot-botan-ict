@@ -14,8 +14,7 @@ from api_server import run_server
 
 logger = logging.getLogger(__name__)
 
-# Daftar symbol default yang dijalankan paralel.
-# Override via env: TRADING_SYMBOLS=BTCUSDT,DOGEUSDT,FARTCOINUSDT
+# Symbol default. Override via env: TRADING_SYMBOLS=BTCUSDT,DOGEUSDT,FARTCOINUSDT
 DEFAULT_SYMBOLS = [
     "BTCUSDT",
     "DOGEUSDT",
@@ -29,7 +28,6 @@ def _get_symbols() -> list:
     raw = os.getenv("TRADING_SYMBOLS", "")
     if raw:
         return [s.strip().upper() for s in raw.split(",") if s.strip()]
-    # Fallback ke TRADING_SYMBOL tunggal (kompatibilitas v28 ke bawah)
     single = os.getenv("TRADING_SYMBOL", "")
     if single:
         return [single.upper()]
@@ -37,14 +35,12 @@ def _get_symbols() -> list:
 
 
 async def _run_symbol(symbol: str):
-    """Jalankan satu BotCore untuk satu symbol."""
-    os.environ["TRADING_SYMBOL"] = symbol
-    bot = BotCore()
+    """Jalankan satu BotCore untuk satu symbol — symbol di-pass langsung, bukan lewat env."""
+    bot = BotCore(symbol=symbol)   # <-- fix: tidak pakai os.environ race condition
     await bot.run()
 
 
 async def run_all(symbols: list):
-    """Jalankan semua symbol secara concurrent dalam satu event loop."""
     tasks = [asyncio.create_task(_run_symbol(sym)) for sym in symbols]
     await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -52,17 +48,13 @@ async def run_all(symbols: list):
 def main():
     symbols = _get_symbols()
 
-    # Flask API di background thread
     threading.Thread(target=run_server, daemon=True).start()
 
     if len(symbols) == 1:
-        # Single symbol — jalankan langsung seperti sebelumnya
-        os.environ["TRADING_SYMBOL"] = symbols[0]
-        bot = BotCore()
+        bot = BotCore(symbol=symbols[0])
         asyncio.run(bot.run())
     else:
-        # Multi-symbol — semua jalan paralel dalam satu event loop
-        logger.info(f"Multi-symbol mode aktif: {', '.join(symbols)}")
+        logger.info(f"Multi-symbol mode: {', '.join(symbols)}")
         asyncio.run(run_all(symbols))
 
 
