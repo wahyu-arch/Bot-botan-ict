@@ -296,6 +296,10 @@ class BotCore:
             self._last_bos_lvl = bos_level
             wl = result.get("watchlist", [])
             if wl:
+                # Buat sesi baru saat BOS — supaya chat Hiura langsung muncul
+                self._new_session(raw_data)
+                if msg:
+                    self._push("ai1", "Hiura", msg, 1)
                 self.watchlist.clear_untriggered()
                 for item in wl:
                     self.watchlist.add(
@@ -303,7 +307,7 @@ class BotCore:
                         condition=item.get("condition", "touch"),
                         reason=item.get("reason", ""),
                         phase="fvg_wait",
-                        session_ref="live",
+                        session_ref=self._session_id,
                     )
                 self._phase = "fvg_wait"
                 logger.info(f"[HIURA] BOS {result.get('bos_type')} @ {bos_level:.2f} | "
@@ -311,6 +315,9 @@ class BotCore:
             else:
                 logger.info(f"[HIURA] BOS {bos_level:.2f} tapi tidak ada FVG fresh")
         elif bos_found:
+            # BOS sama — update sesi yang ada
+            if msg and self._session_id:
+                self._push("ai1", "Hiura", msg, 1)
             logger.info(f"[HIURA] BOS sama @ {bos_level:.2f}")
         else:
             logger.info(f"[HIURA] Belum ada BOS | harga {raw_data.get('price')}")
@@ -349,16 +356,17 @@ class BotCore:
             logger.info(f"[FVG WAIT] Harga {price:.2f} — tunggu FVG touch")
             return
 
-        # Ada watchlist yang disentuh → FVG kena → mulai sesi diskusi
+        # Ada watchlist yang disentuh → FVG kena → panggil Senanan
         item = triggered_items[-1]
-        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.2f} — mulai sesi diskusi")
+        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.2f} — panggil Senanan")
 
-        # SESI BARU dibuat di sini (bukan saat BOS)
-        self._new_session(raw_data)
-        # Kirim konteks Hiura ke sesi ini
-        hiura_msg = self._hiura_data.get("chat_msg", "")
-        if hiura_msg:
-            self._push("ai1", "Hiura", hiura_msg, 1)
+        # Sesi sudah dibuat saat BOS — tidak perlu buat baru
+        # Kalau belum ada sesi (edge case), buat sekarang
+        if not self._session_id:
+            self._new_session(raw_data)
+            hiura_msg = self._hiura_data.get("chat_msg", "")
+            if hiura_msg:
+                self._push("ai1", "Hiura", hiura_msg, 1)
 
         sh = self._hiura_data.get("sh_since_bos", 0)
         sl = self._hiura_data.get("sl_before_bos", 0)
@@ -784,7 +792,12 @@ Max 5 kalimat."""
 
                 # 4. Dispatch ke fase yang tepat
                 if self._phase == "h1_scan":
+                    phase_before = self._phase
                     self._run_h1_scan(raw)
+                    # Kalau Hiura baru saja set fase ke fvg_wait, reset triggered
+                    # supaya watchlist lama yang kebetulan trigger tidak diteruskan
+                    if self._phase != phase_before:
+                        triggered = []
 
                 elif self._phase == "fvg_wait":
                     self._run_fvg_wait(raw, triggered)
