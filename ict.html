@@ -456,6 +456,73 @@ url("https://media0.giphy.com/media/v1.Y2lkPTZjMDliOTUybzZpcG01eXpuZjVsc2xvM2xvd
   display: none;
 }
 .chat-trigger.has-notif .notif-dot { display: block; }
+
+/* COIN BADGE di bubble */
+.coin-badge {
+  display: inline-block;
+  font-size: 10px; font-weight: 700;
+  padding: 1px 6px; border-radius: 8px;
+  margin-right: 5px; vertical-align: middle;
+  background: rgba(83,189,235,0.15);
+  color: var(--nova);
+  border: 1px solid rgba(83,189,235,0.3);
+}
+
+/* BOT STATUS BAR — status tiap symbol */
+.bot-status-bar {
+  border-bottom: 1px solid black;
+  padding: 6px 12px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.bot-status-bar::-webkit-scrollbar { display: none; }
+
+.sym-card {
+  background: #1a2830;
+  border: 1px solid #2a3a44;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 90px;
+}
+.sym-card .sym-name { color: var(--nova); font-weight: 700; font-size: 11.5px; }
+.sym-card .sym-price { color: var(--text); font-size: 11px; }
+.sym-card .sym-phase {
+  font-size: 9.5px; font-weight: 600;
+  padding: 1px 5px; border-radius: 6px;
+  display: inline-block; margin-top: 2px;
+  background: rgba(255,255,255,0.06);
+  color: var(--dim);
+}
+.sym-card .sym-phase.h1_scan    { background: rgba(83,189,235,0.12); color: var(--nova); }
+.sym-card .sym-phase.fvg_wait   { background: rgba(240,180,41,0.15); color: #f0b429; }
+.sym-card .sym-phase.bos_guard  { background: rgba(207,159,255,0.15); color: var(--zara); }
+.sym-card .sym-phase.entry_sniper { background: rgba(37,211,102,0.15); color: var(--green); }
+
+/* LIVE FEED PANEL — pesan Hiura saat belum ada sesi */
+.live-feed-section {
+  align-self: center;
+  background: rgba(83,189,235,0.06);
+  border: 1px solid rgba(83,189,235,0.2);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--dim);
+  margin: 8px 4px;
+  max-width: 90%;
+  line-height: 1.5;
+}
+.live-feed-section .lf-sym {
+  color: var(--nova); font-weight: 700; font-size: 11px; margin-bottom: 3px;
+}
 </style>
 </head>
 <body>
@@ -478,6 +545,10 @@ url("https://media0.giphy.com/media/v1.Y2lkPTZjMDliOTUybzZpcG01eXpuZjVsc2xvM2xvd
 <div class="sess-bar" id="sessBar">
   <div class="chip live active" onclick="goLive(this)">🔴 Live</div>
 </div>
+
+
+<!-- BOT STATUS PER SYMBOL -->
+<div class="bot-status-bar" id="botStatusBar" style="display:none"></div>
 
 <!-- CHAT -->
 <div class="watchlist-bar" id="watchlistBar" style="display:none">
@@ -592,6 +663,16 @@ async function poll() {
       document.getElementById('grpSub').textContent =
         syms.symbols.join(' · ') + ' · Hiura · Senanan · Shina · Yusuf · Katyusha';
     }
+    // Fetch bot status per symbol
+    const botSt = await get('/api/bot_status').catch(()=>null);
+    renderBotStatus(botSt || []);
+
+    // Kalau live mode dan tidak ada sesi aktif, tampilkan live feed
+    if (!currId && (!data || data.status === 'idle')) {
+      const feed = await get('/api/live/feed').catch(()=>null);
+      renderLiveFeed(feed || []);
+    }
+
     setDot('on');
   } catch(e) {
     setDot('err');
@@ -654,7 +735,15 @@ function renderDayChip(ts, lossCtx) {
   }
 }
 
-function injectMessages(messages, conclusion, status) {
+function injectMessages(messages, conclusion, status, isReplay = false) {
+  // Simpan untuk re-render saat filter
+  if (!isReplay) {
+    window._lastMessages = messages;
+    window._lastConclusion = conclusion;
+    window._lastStatus = status;
+    // Reset live feed counter saat masuk sesi baru
+    _liveFeedRendered = 0;
+  }
   const chat  = document.getElementById('chat');
   const wasAtBottom = isAtBottom();
 
@@ -664,6 +753,8 @@ function injectMessages(messages, conclusion, status) {
   removeTyping();
 
   newMsgs.forEach((msg, idx) => {
+    // Filter per koin kalau aktif
+    if (_activeCoinFilter && msg.symbol && msg.symbol !== _activeCoinFilter) return;
     const globalIdx = rendered + idx;
     const ronde = msg.ronde || (Math.floor(globalIdx / 2) + 1);
 
@@ -685,9 +776,10 @@ function injectMessages(messages, conclusion, status) {
       : '';
     const senderAlign = side === 'R' ? 'text-align:right;padding-right:10px;padding-left:0' : '';
 
+    const coinBadge = msg.symbol ? `<span class="coin-badge">${msg.symbol.replace('USDT','')}</span>` : '';
     chat.insertAdjacentHTML('beforeend', `
       <div class="row ${side}">
-        <div class="sender ${ai.cls}" style="${senderAlign}">${ai.label}</div>
+        <div class="sender ${ai.cls}" style="${senderAlign}">${ai.label}${msg.symbol ? ' <span style="font-size:10px;color:var(--dim)">· ' + msg.symbol.replace('USDT','') + '</span>' : ''}</div>
         <div class="bubble ${isKatyusha ? 'katyusha-bubble' : side}">${esc(txt)}
           <div class="foot">
             <span class="btime">${ts}</span>
@@ -998,6 +1090,89 @@ async function pollChat() {
       }
     });
   } catch(e) {}
+}
+
+// ── BOT STATUS PER SYMBOL ─────────────────────────────
+function renderBotStatus(items) {
+  const bar = document.getElementById('botStatusBar');
+  if (!items || !items.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+
+  bar.innerHTML = items.map(s => {
+    const sym   = s.symbol || '';
+    const name  = sym.replace('USDT','');
+    const phase = s.phase || 'h1_scan';
+    const price = s.price ? parseFloat(s.price) : 0;
+
+    // Format harga: kalau < 0.01 pakai 6 desimal
+    const priceStr = price === 0 ? '—'
+      : price < 0.01 ? price.toFixed(6)
+      : price < 1    ? price.toFixed(4)
+      : price < 100  ? price.toFixed(3)
+      : price.toFixed(2);
+
+    const phaseLabel = {
+      'h1_scan':      'Scanning',
+      'fvg_wait':     'FVG Wait',
+      'bos_guard':    'BOS Guard',
+      'entry_sniper': 'Entry!',
+    }[phase] || phase;
+
+    const wl = s.wl_count || 0;
+    return `<div class="sym-card" onclick="filterByCoin('${sym}')" title="Klik untuk filter chat ${sym}">
+      <div class="sym-name">${name} ${wl > 0 ? '<b style="color:var(--green)">●</b>' : '○'}</div>
+      <div class="sym-price">${priceStr}</div>
+      <div class="sym-phase ${phase}">${phaseLabel}</div>
+    </div>`;
+  }).join('');
+}
+
+// Filter chat berdasarkan koin
+let _activeCoinFilter = null;
+function filterByCoin(symbol) {
+  if (_activeCoinFilter === symbol) {
+    _activeCoinFilter = null;  // toggle off
+    document.getElementById('grpSub').textContent = 'Yusuf · Shina · Senanan · Hiura · Katyusha';
+  } else {
+    _activeCoinFilter = symbol;
+    const name = symbol.replace('USDT','');
+    document.getElementById('grpSub').textContent = `Filter: ${name} · klik kartu lagi untuk semua`;
+  }
+  // Re-render pesan dengan filter
+  if (window._lastMessages) {
+    clearChat();
+    injectMessages(window._lastMessages, window._lastConclusion, window._lastStatus, true);
+  }
+}
+
+// ── LIVE FEED (tampil saat idle, sebelum ada BOS) ─────────────────
+let _liveFeedRendered = 0;
+function renderLiveFeed(items) {
+  const chat = document.getElementById('chat');
+  if (!items.length) return;
+
+  const newItems = items.slice(_liveFeedRendered);
+  if (!newItems.length) return;
+  _liveFeedRendered = items.length;
+
+  const wasAtBottom = isAtBottom();
+
+  newItems.forEach(m => {
+    if (_activeCoinFilter && m.symbol && m.symbol !== _activeCoinFilter) return;
+    const sym = m.symbol ? m.symbol.replace('USDT','') : '';
+    const symBadge = sym ? `<span class="coin-badge">${sym}</span>` : '';
+    const ts = m.timestamp
+      ? new Date(m.timestamp).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})
+      : '';
+    chat.insertAdjacentHTML('beforeend', `
+      <div class="live-feed-section">
+        <div class="lf-sym">${symBadge} ${m.nama || 'Hiura'} · Scanning</div>
+        ${esc(m.pesan || '')}
+        <div style="font-size:10px;color:rgba(255,255,255,.2);margin-top:4px;text-align:right">${ts}</div>
+      </div>`);
+  });
+
+  if (wasAtBottom) scrollBottom();
 }
 
 setInterval(pollChat, 2000);

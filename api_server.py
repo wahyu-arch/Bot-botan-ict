@@ -29,7 +29,7 @@ def update_watchlist(items: list, symbol: str = ""):
         _watchlist_by_symbol[symbol] = items
 
 
-def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str):
+def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str, symbol: str = ""):
     """Dipanggil oleh bot setiap kali ada pesan baru dari AI panel."""
     global _current_session
     if _current_session is None or _current_session["id"] != session_id:
@@ -39,6 +39,7 @@ def push_message(ai_id: str, nama: str, pesan: str, ronde: int, session_id: str)
         "nama": nama,
         "pesan": pesan,
         "ronde": ronde,
+        "symbol": symbol or _current_session.get("signal", {}).get("symbol", ""),
         "side": "right" if ai_id.lower() == "yusuf" else "left",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
@@ -117,22 +118,42 @@ def get_live():
 # Pesan-pesan singkat yang masuk ke live feed tanpa sesi formal
 _live_feed: list = []
 
-def push_live_msg(ai: str, nama: str, pesan: str):
+# Status per-symbol dari bot (phase, harga, watchlist count)
+_bot_status: dict = {}  # key = symbol
+
+def update_bot_status(symbol: str, phase: str, price: float, wl_count: int):
+    """Dipanggil bot setiap siklus untuk update status per symbol."""
+    _bot_status[symbol] = {
+        "symbol": symbol,
+        "phase": phase,
+        "price": price,
+        "wl_count": wl_count,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+def push_live_msg(ai: str, nama: str, pesan: str, symbol: str = ""):
     """Push pesan ke live feed tanpa membuat sesi baru."""
     global _live_feed
     _live_feed.append({
         "ai": ai, "nama": nama, "pesan": pesan,
+        "symbol": symbol,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ronde": 0,
         "side": "right" if ai == "yusuf" else "left",
     })
-    _live_feed = _live_feed[-50:]  # max 50 pesan
+    _live_feed = _live_feed[-100:]  # max 100 pesan
 
 
 @app.route("/api/live/feed")
 def get_live_feed():
     """Live feed: semua pesan singkat status AI (tidak perlu sesi)."""
     return jsonify(_live_feed)
+
+
+@app.route("/api/bot_status")
+def get_bot_status():
+    """Status realtime tiap symbol: fase, harga, jumlah watchlist."""
+    return jsonify(list(_bot_status.values()))
 
 
 @app.route("/api/rules")

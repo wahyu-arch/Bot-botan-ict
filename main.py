@@ -14,7 +14,6 @@ from api_server import run_server
 
 logger = logging.getLogger(__name__)
 
-# Symbol default. Override via env: TRADING_SYMBOLS=BTCUSDT,DOGEUSDT,FARTCOINUSDT
 DEFAULT_SYMBOLS = [
     "BTCUSDT",
     "DOGEUSDT",
@@ -22,6 +21,10 @@ DEFAULT_SYMBOLS = [
     "XVGUSDT",
     "1000BONKUSDT",
 ]
+
+# Jeda kecil antar symbol saat startup, supaya tidak hit Groq bersamaan di detik yang sama.
+# M5 alignment di bot_core sudah handle timing utama — stagger ini hanya untuk startup.
+STAGGER_SECONDS = 10
 
 
 def _get_symbols() -> list:
@@ -34,27 +37,29 @@ def _get_symbols() -> list:
     return DEFAULT_SYMBOLS
 
 
-async def _run_symbol(symbol: str):
-    """Jalankan satu BotCore untuk satu symbol — symbol di-pass langsung, bukan lewat env."""
-    bot = BotCore(symbol=symbol)   # <-- fix: tidak pakai os.environ race condition
+async def _run_symbol(symbol: str, stagger: float):
+    """Jalankan satu BotCore. Symbol di-pass langsung, stagger via delay."""
+    bot = BotCore(symbol=symbol, stagger_delay=stagger)
     await bot.run()
 
 
 async def run_all(symbols: list):
-    tasks = [asyncio.create_task(_run_symbol(sym)) for sym in symbols]
+    tasks = [
+        asyncio.create_task(_run_symbol(sym, i * STAGGER_SECONDS))
+        for i, sym in enumerate(symbols)
+    ]
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main():
     symbols = _get_symbols()
-
     threading.Thread(target=run_server, daemon=True).start()
 
     if len(symbols) == 1:
         bot = BotCore(symbol=symbols[0])
         asyncio.run(bot.run())
     else:
-        logger.info(f"Multi-symbol mode: {', '.join(symbols)}")
+        logger.info(f"Multi-symbol mode: {', '.join(symbols)} | stagger {STAGGER_SECONDS}s")
         asyncio.run(run_all(symbols))
 
 

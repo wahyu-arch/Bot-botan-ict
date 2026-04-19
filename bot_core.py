@@ -47,13 +47,14 @@ logging.basicConfig(
 
 
 class BotCore:
-    def __init__(self, symbol: str = ""):
+    def __init__(self, symbol: str = "", stagger_delay: float = 0.0):
         # Symbol bisa di-pass langsung (multi-symbol mode) atau via env (single mode)
         if not symbol:
             symbol = os.getenv("TRADING_SYMBOL", "BTCUSDT").strip()
         self.symbols = [symbol]  # untuk kompatibilitas
+        self._stagger_delay = stagger_delay  # detik delay sebelum siklus pertama
         paper       = os.getenv("PAPER_TRADING", "true").lower() == "true"
-        scan_sec    = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
+        scan_sec    = int(os.getenv("SCAN_INTERVAL_SECONDS", "0"))  # 0 = auto align ke M5 close
 
         # API keys
         groq_key  = (os.environ.get("GROQ_API_KEY") or
@@ -125,7 +126,7 @@ class BotCore:
 
     def _push(self, ai_key: str, name: str, msg: str, ronde: int = 1):
         if msg and self._session_id:
-            api_server.push_message(ai_key, name, msg, ronde, self._session_id)
+            api_server.push_message(ai_key, name, msg, ronde, self._session_id, self.symbol)
 
     def _finish_session(self, conclusion: dict):
         if self._session_id:
@@ -141,6 +142,25 @@ class BotCore:
         if self._session_id:
             self._finish_session({"consensus": reason or "reset"})
         self._session_id = ""
+
+    async def _wait_next_m5_close(self):
+        """
+        Tidur sampai tepat setelah candle M5 Bybit berikutnya close.
+        Candle M5 Bybit close di menit: 0,5,10,15,...,55 setiap jam.
+        Tambah 2 detik buffer agar candle sudah pasti terdaftar di API.
+        Kalau SCAN_INTERVAL_SECONDS di-set manual, pakai itu saja.
+        """
+        if self.scan_interval > 0:
+            await asyncio.sleep(self.scan_interval)
+            return
+
+        now = datetime.now(timezone.utc)
+        seconds_into_interval = (now.minute % 5) * 60 + now.second
+        seconds_to_close = (5 * 60) - seconds_into_interval
+        wait = seconds_to_close + 2  # +2s buffer Bybit update klines
+
+        logger.info(f"[{self.symbol}] Tunggu M5 close: {wait:.0f}s")
+        await asyncio.sleep(wait)
 
     def _logic_ctx(self) -> str:
         return self.logic.get_context_for_ai()
@@ -246,7 +266,7 @@ class BotCore:
 
         # Hiura SELALU ke live feed — tidak pernah buat sesi baru
         if msg:
-            api_server.push_live_msg("ai1", "Hiura", msg)
+            api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
 
         if bos_found and bos_level != self._last_bos_lvl:
             self._last_bos_lvl = bos_level
@@ -669,13 +689,18 @@ Max 5 kalimat."""
         logger.info(f"BotCore starting | {self.symbol} | {'PAPER' if self.paper else 'LIVE'}")
         logger.info("=" * 60)
 
+        # Stagger delay: hindari semua symbol hit Groq API bersamaan
+        if self._stagger_delay > 0:
+            logger.info(f"[{self.symbol}] Stagger delay {self._stagger_delay:.0f}s sebelum mulai...")
+            await asyncio.sleep(self._stagger_delay)
+
         while True:
             try:
                 # 1. Ambil data mentah
                 raw = self.data.get_raw()
                 if not raw:
                     logger.error("[BOT] Gagal ambil data market")
-                    await asyncio.sleep(self.scan_interval)
+                    await asyncio.sleep(30)  # retry lebih cepat kalau error
                     continue
 
                 price = raw["price"]
@@ -751,6 +776,10 @@ Max 5 kalimat."""
 
                 # 5. Update watchlist ke API
                 api_server.update_watchlist(self.watchlist.to_api_dict(), self.symbol)
+                api_server.update_bot_status(
+                    self.symbol, self._phase, price,
+                    len(self.watchlist.get_active())
+                )
 
                 self._prev_price = price
 
@@ -768,4 +797,4 @@ Max 5 kalimat."""
             except Exception as e:
                 logger.error(f"[BOT] Error: {e}", exc_info=True)
 
-            await asyncio.sleep(self.scan_interval)
+            await self._wait_next_m5_close()
