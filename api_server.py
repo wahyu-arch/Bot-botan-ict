@@ -306,7 +306,7 @@ def get_balance():
         from trade_executor import TradeExecutor
         executor = TradeExecutor(paper_mode=os.getenv("PAPER_TRADING","true").lower()=="true")
         balance = executor.get_account_balance()
-        return jsonify({"balance_usdt": balance, "symbol": os.getenv("TRADING_SYMBOL","BTCUSDT")})
+        syms = os.getenv("TRADING_SYMBOLS", os.getenv("TRADING_SYMBOL","BTCUSDT")); return jsonify({"balance_usdt": balance, "symbols": syms})
     except Exception as e:
         return jsonify({"error": str(e)[:100]}), 500
 

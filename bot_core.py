@@ -48,8 +48,7 @@ logging.basicConfig(
 
 class BotCore:
     def __init__(self):
-        # Multi-symbol: TRADING_SYMBOL bisa berupa "BTCUSDT,ETHUSDT,SOLUSDT"
-        symbols_raw = os.getenv("TRADING_SYMBOL", "BTCUSDT")
+        symbols_raw = os.getenv("TRADING_SYMBOLS", os.getenv("TRADING_SYMBOL", "BTCUSDT"))
         self.symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
         symbol = self.symbols[0]  # symbol utama untuk instance ini
         paper       = os.getenv("PAPER_TRADING", "true").lower() == "true"
@@ -565,7 +564,7 @@ Max 5 kalimat."""
 
     def _monitor_trades(self, raw_data: dict):
         """Cek trade yang sedang berjalan. Kalau ada yang close, proses debrief."""
-        closed = self.executor.get_closed_trades()
+        closed = self.executor.check_closed_trades()
         for trade in closed:
             result = trade.get("result")
             if result not in ("win", "loss"):
