@@ -156,6 +156,18 @@ def get_bot_status():
     return jsonify(list(_bot_status.values()))
 
 
+@app.route("/api/prompts")
+@app.route("/api/prompts/")
+def get_prompts():
+    """Prompt instruksi untuk setiap AI."""
+    os.makedirs("data", exist_ok=True)
+    try:
+        with open("data/prompts.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return '{"error": "prompts not found"}', 200, {"Content-Type": "application/json"}
+
+
 @app.route("/api/rules")
 @app.route("/api/rules/")
 def get_rules():

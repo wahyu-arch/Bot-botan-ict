@@ -32,6 +32,7 @@ from ai_analysts import (
 from watchlist_engine import WatchlistEngine
 from rules_engine import RulesEngine
 from logic_engine import LogicEngine
+from prompt_engine import PromptEngine
 from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
@@ -90,6 +91,7 @@ class BotCore:
         self.watchlist = WatchlistEngine()
         self.rules    = RulesEngine()
         self.logic    = LogicEngine()
+        self.prompts  = PromptEngine()
         self.memory   = MemorySystem()
         self.risk     = RiskManager()
         self.executor = TradeExecutor(paper_mode=paper)
@@ -243,9 +245,29 @@ class BotCore:
             self.logic._save(logic)
             logger.info(f"[KATYUSHA] logic_rules.json saved v{logic['_version']}")
 
+        # PROMPTS: update instruksi AI
+        prompts = self.prompts.prompts.copy()
+        prompts_dirty = False
+        for ch in k_result.get("prompt_updates", []):
+            ai_name = ch.get("ai", "").lower()
+            field   = ch.get("field", "")
+            value   = ch.get("value", "")
+            if ai_name and field and value is not None and ai_name in prompts:
+                old_val = prompts[ai_name].get(field, "")
+                prompts[ai_name][field] = value
+                prompts_dirty = True
+                logger.info(f"[KATYUSHA] prompt UPDATE: {ai_name}.{field}: '{old_val[:40]}' → '{str(value)[:40]}'")
+
+        if prompts_dirty:
+            prompts["_update_reason"] = f"Katyusha review: {k_result.get('reasoning','')[:80]}"
+            prompts["_version"] = prompts.get("_version", 1) + 1
+            self.prompts.save(prompts)
+            logger.info(f"[KATYUSHA] prompts.json saved v{prompts['_version']}")
+
         total = (len(k_result.get("rules_changes",[])) + len(k_result.get("rules_adds",[])) +
                  len(k_result.get("rules_removes",[])) + len(k_result.get("logic_changes",[])) +
-                 len(k_result.get("logic_adds",[])) + len(k_result.get("logic_removes",[])))
+                 len(k_result.get("logic_adds",[])) + len(k_result.get("logic_removes",[])) +
+                 len(k_result.get("prompt_updates",[])))
         if total > 0:
             logger.info(f"[KATYUSHA] Total {total} perubahan diterapkan")
 
@@ -256,7 +278,8 @@ class BotCore:
 
         result = hiura_h1_analysis(
             self.clients[0], self.model_ai1,
-            raw_data, self._logic_ctx()
+            raw_data, self._logic_ctx(),
+            prompt_ctx=self.prompts.build_context('hiura')
         )
         self._hiura_data = result
 
@@ -264,9 +287,10 @@ class BotCore:
         bos_found = result.get("bos_found", False)
         msg       = result.get("chat_msg", "")
 
-        # Hiura SELALU ke live feed — tidak pernah buat sesi baru
-        if msg:
-            api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
+        # Hiura SELALU ke live feed — bahkan kalau parse gagal
+        if not msg:
+            msg = f"Hiura: memantau {self.symbol} @ {raw_data.get('price',0):.2f}..."
+        api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
 
         if bos_found and bos_level != self._last_bos_lvl:
             self._last_bos_lvl = bos_level
@@ -344,7 +368,8 @@ class BotCore:
         result = senanan_idm_hunt(
             self.clients[1], self.model_ai2,
             raw_data, sh, sl, m5_dir, bias,
-            self._logic_ctx()
+            self._logic_ctx(),
+            prompt_ctx=self.prompts.build_context('senanan')
         )
         self._senanan_data = result
         self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
@@ -383,7 +408,8 @@ class BotCore:
         result = shina_bos_mss(
             self.clients[2], self.model_ai3,
             raw_data, self._senanan_data,
-            bias, sh, sl
+            bias, sh, sl,
+            prompt_ctx=self.prompts.build_context('shina')
         )
         self._shina_data = result
         self._push("ai3", "Shina", result.get("chat_msg", ""), 3)
@@ -424,7 +450,8 @@ class BotCore:
         result = yusuf_entry(
             self.clients[3], self.model_json,
             raw_data, self._hiura_data, self._shina_data,
-            trade_mem, self._logic_ctx()
+            trade_mem, self._logic_ctx(),
+            prompt_ctx=self.prompts.build_context('yusuf')
         )
         self._push("ai4", "Yusuf", result.get("chat_msg", ""), 4)
 
