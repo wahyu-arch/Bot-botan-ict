@@ -105,25 +105,40 @@ class TradeExecutor:
         qty: float,
     ) -> dict:
         """
-        Kirim market order ke Bybit Linear Perpetual.
-        Menggunakan orderLinkId agar idempoten.
+        Kirim market order ke Bybit Linear Perpetual dengan leverage.
+        Set leverage dulu sebelum order.
         """
-        symbol = os.getenv("TRADING_SYMBOL", "BTCUSDT")
-        side = "Buy" if direction == "buy" else "Sell"
+        symbol   = os.getenv("TRADING_SYMBOL", "BTCUSDT")
+        leverage = int(os.getenv("LEVERAGE", "10"))
+        side     = "Buy" if direction == "buy" else "Sell"
 
         try:
+            # Set leverage sebelum order
+            try:
+                self.bybit.set_leverage(
+                    category="linear",
+                    symbol=symbol,
+                    buyLeverage=str(leverage),
+                    sellLeverage=str(leverage),
+                )
+                logger.info(f"Leverage set: {symbol} x{leverage}")
+            except Exception as lev_err:
+                # Leverage sudah di-set sebelumnya → tidak masalah
+                logger.debug(f"set_leverage: {lev_err}")
+
             resp = self.bybit.place_order(
                 category="linear",
                 symbol=symbol,
                 side=side,
                 orderType="Market",
                 qty=str(qty),
-                stopLoss=str(round(stop_loss, 4)),
-                takeProfit=str(round(take_profit, 4)),
+                stopLoss=str(round(stop_loss, 6)),
+                takeProfit=str(round(take_profit, 6)),
                 slTriggerBy="MarkPrice",
                 tpTriggerBy="MarkPrice",
                 timeInForce="IOC",
                 orderLinkId=trade_id,
+                positionIdx=0,   # 0 = one-way mode
                 reduceOnly=False,
             )
 

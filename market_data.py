@@ -28,17 +28,18 @@ class MarketDataFetcher:
 
     def _init_mock_price(self):
         defaults = {
-            "BTCUSDT":     65000.0,
-            "ETHUSDT":     3500.0,
-            "SOLUSDT":     180.0,
-            "XRPUSDT":     0.62,
-            "BNBUSDT":     580.0,
-            "DOGEUSDT":    0.18,
+            "BTCUSDT":      65000.0,
+            "ETHUSDT":      3500.0,
+            "SOLUSDT":      180.0,
+            "XRPUSDT":      0.62,
+            "BNBUSDT":      580.0,
+            "DOGEUSDT":     0.18,
+            "XVGUSDT":      0.0045,
             "FARTCOINUSDT": 0.95,
-            "XVGUSDT":     0.0045,
             "1000BONKUSDT": 0.028,
+            "TAOUSDT":      240.0,
         }
-        self.mock_price = defaults.get(self.symbol, 100.0)
+        self.mock_price = defaults.get(self.symbol, 1.0)
 
     def _init_bybit(self):
         try:
