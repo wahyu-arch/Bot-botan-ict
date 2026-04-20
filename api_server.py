@@ -177,27 +177,47 @@ def get_prompts():
 @app.route("/api/rules")
 @app.route("/api/rules/")
 def get_rules():
-    """Rules aktif saat ini."""
-    import json, os
+    """Rules aktif — auto-create dari default kalau belum ada."""
+    import json, os, shutil
     os.makedirs("data", exist_ok=True)
+    if not os.path.exists("data/rules.json"):
+        # Coba copy dari rules.json di root (ada di source code)
+        for src in ["rules.json", "data/rules.json.default"]:
+            if os.path.exists(src):
+                shutil.copy(src, "data/rules.json")
+                break
+        else:
+            # Buat minimal default
+            default = {"_version": 1, "_update_reason": "Auto-generated", "entry": {"min_confidence": 0.6, "max_confidence_allowed": 0.85}, "tp": {"min_rr": 2.0}, "risk": {"risk_per_trade_pct": 1.0}}
+            with open("data/rules.json", "w") as f:
+                json.dump(default, f, indent=2)
     try:
         with open("data/rules.json") as f:
             return f.read(), 200, {"Content-Type": "application/json"}
-    except Exception:
-        # File belum ada — kembalikan default kosong
-        return '{"_version": 1, "_update_reason": "File not created yet — bot belum jalan"}', 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
 
 
 @app.route("/api/logic")
 @app.route("/api/logic/")
 def get_logic():
-    """Logic rules aktif saat ini."""
+    """Logic rules aktif — auto-create dari default kalau belum ada."""
+    import json, os, shutil
     os.makedirs("data", exist_ok=True)
+    if not os.path.exists("data/logic_rules.json"):
+        for src in ["data/logic_rules.json.default"]:
+            if os.path.exists(src):
+                shutil.copy(src, "data/logic_rules.json")
+                break
+        else:
+            default = {"_version": 1, "_update_reason": "Auto-generated", "find_bos_h1": {"method": "swing_break", "swing_left": 8, "swing_right": 8, "lookback": 100}, "find_fvg_h1": {"method": "three_candle_gap", "min_gap_pct": 0.05}, "entry": {"condition": "mss_confirmed", "skip_if_outside_fvg": False}}
+            with open("data/logic_rules.json", "w") as f:
+                json.dump(default, f, indent=2)
     try:
         with open("data/logic_rules.json") as f:
             return f.read(), 200, {"Content-Type": "application/json"}
-    except Exception:
-        return '{"_version": 1, "_update_reason": "File not created yet"}', 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
 
 
 @app.route("/api/logic/history")

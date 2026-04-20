@@ -551,39 +551,67 @@ class BotCore:
             # Ringkasan rules/logic
             rules_summary = json.dumps(
                 {k: v for k, v in self.rules.rules.items() if not k.startswith("_")},
-                ensure_ascii=False
-            )[:600]
+                ensure_ascii=False, indent=None
+            )
             logic_summary = json.dumps(
                 {k: v for k, v in self.logic.rules.items() if not k.startswith("_")},
-                ensure_ascii=False
-            )[:600]
+                ensure_ascii=False, indent=None
+            )
 
             watchlist_text = self.watchlist.summary()
 
-            prompt = f"""Kamu adalah Katyusha, supervisor ICT trading bot via Claude Sonnet.
-Kamu sedang chat langsung dengan owner bot.
+            # Ambil history chat untuk memori percakapan
+            try:
+                hist_resp = _req.get(f"http://localhost:{port}/api/chat", timeout=3)
+                chat_history = hist_resp.json() if hist_resp.ok else []
+            except Exception:
+                chat_history = []
+
+            # Bangun messages dengan history (max 20 pesan terakhir)
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"""Kamu adalah Katyusha, supervisor ICT trading bot dengan authority penuh.
+Kamu bisa mengubah rules.json, logic_rules.json, dan prompts.json secara langsung.
 
 STATUS BOT SAAT INI:
-- Harga: {price}
-- Fase: {phase}
+- Symbol: {self.symbol} | Harga: {price} | Fase: {phase}
 - Saldo USDT: {balance:.2f}
 - Total trade: {stats.get('total_trades',0)} | Win rate: {stats.get('win_rate',0):.0%}
-- Min RR saat ini: {min_rr}
-- Watchlist aktif: {watchlist_text}
+- Watchlist: {watchlist_text}
 
-RULES (ringkasan): {rules_summary}
-LOGIC (ringkasan): {logic_summary}
+RULES LENGKAP:
+{rules_summary}
 
-PESAN DARI OWNER:
-{user_msg}
+LOGIC LENGKAP:
+{logic_summary}
 
-TUGASMU:
-Jawab pertanyaan owner dengan jujur dan informatif.
-Jika owner minta ubah sesuatu (rules/logic/parameter) → jelaskan apa yang akan kamu ubah dan konfirmasi.
-Jika owner tanya tentang sistem → jelaskan dengan bahasa yang mudah dimengerti.
-Jika ada bug yang kamu ketahui → beritahu.
-Gaya: santai tapi informatif, seperti asisten yang kompeten.
-Max 5 kalimat."""
+KEMAMPUANMU:
+- Jika owner minta ubah rules/logic/prompts → langsung apply dengan format JSON di akhir response:
+  <APPLY_CHANGES>
+  {{"rules_changes": [{{"section": "entry", "key": "min_confidence", "new": 0.65, "reason": "..."}}],
+    "logic_changes": [],
+    "prompts_changes": [{{"ai": "hiura", "key": "focus", "new": "...", "reason": "..."}}]}}
+  </APPLY_CHANGES>
+- Jika hanya jawab pertanyaan → tidak perlu blok APPLY_CHANGES
+- Kamu PUNYA MEMORI — ini adalah history chat kita
+- Gaya: santai, informatif, bahasa Indonesia, max 4 kalimat"""
+                }
+            ]
+
+            # Tambah history (skip pesan pertama yang mungkin kosong)
+            for m in chat_history[-20:]:
+                role = m.get("role", "user")
+                txt  = m.get("content", "")
+                if txt and role in ("user", "katyusha"):
+                    messages.append({
+                        "role": "user" if role == "user" else "assistant",
+                        "content": txt
+                    })
+
+            # Pesan user saat ini (sudah ada di history, tapi pastikan ada)
+            if not messages or messages[-1].get("content") != user_msg:
+                messages.append({"role": "user", "content": user_msg})
 
             import requests
             k_resp = requests.post(
@@ -595,25 +623,49 @@ Max 5 kalimat."""
                 },
                 json={
                     "model": "anthropic/claude-sonnet-4-6",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": 400,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 800,
                 },
                 timeout=30,
             )
             answer = k_resp.json()["choices"][0]["message"]["content"].strip()
-            logger.info(f"[CHAT] Katyusha: {answer[:80]}")
+            logger.info(f"[CHAT] Katyusha: {answer[:100]}")
+
+            # Parse dan apply perubahan kalau ada blok APPLY_CHANGES
+            import re as _re
+            apply_match = _re.search(r"<APPLY_CHANGES>(.*?)</APPLY_CHANGES>", answer, _re.DOTALL)
+            clean_answer = _re.sub(r"<APPLY_CHANGES>.*?</APPLY_CHANGES>", "", answer, flags=_re.DOTALL).strip()
+            if apply_match:
+                try:
+                    changes = json.loads(apply_match.group(1).strip())
+                    self._katyusha_apply_changes(changes)
+                    # Apply prompts changes
+                    for ch in changes.get("prompts_changes", []):
+                        ai_key = ch.get("ai", "")
+                        key    = ch.get("key", "")
+                        val    = ch.get("new")
+                        if ai_key and key and val is not None:
+                            if ai_key not in self.prompts.prompts:
+                                self.prompts.prompts[ai_key] = {}
+                            self.prompts.prompts[ai_key][key] = val
+                    if changes.get("prompts_changes"):
+                        self.prompts.save(self.prompts.prompts)
+                    logger.info(f"[CHAT] Katyusha applied changes dari chat")
+                    clean_answer += "\n✅ Perubahan sudah diapply!"
+                except Exception as apply_err:
+                    logger.warning(f"[CHAT] Gagal apply changes: {apply_err}")
 
             # Push jawaban ke API
             _req.post(
                 f"http://localhost:{port}/api/chat/answer",
-                json={"answer": answer},
+                json={"answer": clean_answer},
                 timeout=3,
             )
 
             # Juga push ke sesi chat grup kalau ada
             if self._session_id:
-                self._push("katyusha", "Katyusha", answer, 5)
+                self._push("katyusha", "Katyusha", clean_answer, 5)
 
         except Exception as e:
             logger.warning(f"[CHAT] Error handling user chat: {str(e)[:80]}")
