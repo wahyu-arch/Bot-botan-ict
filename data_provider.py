@@ -16,6 +16,18 @@ class DataProvider:
         self.symbol = symbol
         self.fetcher = MarketDataFetcher(symbol)
 
+    @staticmethod
+    def _price_decimals(price: float) -> int:
+        """Tentukan jumlah desimal berdasarkan magnitude harga."""
+        if price == 0:
+            return 8
+        if price >= 1000:   return 2   # BTC, ETH high
+        if price >= 10:     return 3   # SOL, BNB, TAO
+        if price >= 1:      return 4   # XRP, DOGE
+        if price >= 0.1:    return 5   # FARTCOIN ~0.19
+        if price >= 0.01:   return 6   # koin murah
+        return 8                        # XVG, BONK, dll
+
     def get_raw(self) -> dict | None:
         """Ambil candle H1 dan M5 mentah. Return dict atau None kalau gagal."""
         try:
@@ -30,26 +42,31 @@ class DataProvider:
             if not h1_candles or not m5_candles:
                 return None
 
+            # Tentukan presisi dari candle pertama
+            sample_price = h1_candles[0].get("close", 1.0) if h1_candles else 1.0
+            dec = self._price_decimals(sample_price)
+
             # Format candle: hanya data yang AI butuhkan
             def fmt(candles, skip_last=True):
                 data = candles[:-1] if skip_last and len(candles) > 1 else candles
                 return [
                     {
                         "i":  i,
-                        "o":  round(c["open"],  2),
-                        "h":  round(c["high"],  2),
-                        "l":  round(c["low"],   2),
-                        "c":  round(c["close"], 2),
+                        "o":  round(c["open"],  dec),
+                        "h":  round(c["high"],  dec),
+                        "l":  round(c["low"],   dec),
+                        "c":  round(c["close"], dec),
                         "ts": c.get("timestamp", "")[:16],
                         "bull": c["close"] > c["open"],
                     }
                     for i, c in enumerate(data)
                 ]
 
+            bid = price.get("bid", 0)
             return {
                 "symbol":  self.symbol,
-                "price":   round(price.get("bid", 0), 2),
-                "spread":  round(price.get("spread", 0), 4),
+                "price":   round(bid, self._price_decimals(bid)),
+                "spread":  round(price.get("spread", 0), 8),
                 "h1":      fmt(h1_candles),   # closed H1 candles
                 "m5":      fmt(m5_candles),   # closed M5 candles
                 "h1_live": fmt(h1_candles, skip_last=False)[-1],  # candle H1 berjalan

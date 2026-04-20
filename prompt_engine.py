@@ -23,7 +23,47 @@ class PromptEngine:
                 return p
             except Exception as e:
                 logger.error(f"[PROMPTS] Load error: {e}")
-        return {}
+        # File tidak ada — buat default dan simpan
+        default = self._default()
+        try:
+            with open(PROMPTS_FILE, "w") as f:
+                json.dump(default, f, indent=2, ensure_ascii=False)
+            logger.info("[PROMPTS] Default prompts.json dibuat")
+        except Exception as e:
+            logger.warning(f"[PROMPTS] Gagal simpan default: {e}")
+        return default
+
+    def _default(self) -> dict:
+        return {
+            "_version": 1,
+            "_last_updated": None,
+            "_update_reason": "Auto-generated default",
+            "hiura": {
+                "focus": "Analisis struktur H1: BOS, FVG, bias market",
+                "style": "Singkat, teknikal, pakai angka persis dari candle",
+                "extra_instructions": ""
+            },
+            "senanan": {
+                "focus": "Cari IDM M5: identifikasi swing, gap, level watch",
+                "style": "State machine, langkah per langkah",
+                "extra_instructions": ""
+            },
+            "shina": {
+                "focus": "Konfirmasi BOS/MSS M5 setelah IDM disentuh",
+                "style": "Tegas: entry atau wait, sertakan alasan",
+                "extra_instructions": ""
+            },
+            "yusuf": {
+                "focus": "Entry presisi: tentukan entry, SL, TP dengan angka persis",
+                "style": "Entry sniper, percaya diri, RR minimal 2:1",
+                "extra_instructions": ""
+            },
+            "katyusha": {
+                "focus": "Supervisor: validasi semua AI, override kalau perlu",
+                "style": "Otoritatif, langsung ke poin, bahasa Indonesia",
+                "extra_instructions": ""
+            }
+        }
 
     def reload(self):
         self._prompts = self._load()

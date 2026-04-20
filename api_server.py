@@ -159,8 +159,14 @@ def get_bot_status():
 @app.route("/api/prompts")
 @app.route("/api/prompts/")
 def get_prompts():
-    """Prompt instruksi untuk setiap AI."""
+    """Prompt instruksi untuk setiap AI — auto-create default kalau belum ada."""
     os.makedirs("data", exist_ok=True)
+    if not os.path.exists("data/prompts.json"):
+        try:
+            from prompt_engine import PromptEngine
+            PromptEngine()  # constructor auto-create default
+        except Exception:
+            pass
     try:
         with open("data/prompts.json") as f:
             return f.read(), 200, {"Content-Type": "application/json"}
