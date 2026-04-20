@@ -91,37 +91,54 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     h1_table = _candle_table(raw_data["h1"], limit=100)
     price = raw_data["price"]
 
+    # Baca rules dari JSON untuk inject ke prompt
+    logic = ctx.get("logic_raw", {}) if ctx else {}
+    bos_cfg = logic.get("find_bos_h1", {})
+    fvg_cfg = logic.get("find_fvg_h1", {})
+    sw_left  = bos_cfg.get("swing_left",  8)
+    sw_right = bos_cfg.get("swing_right", 8)
+    sw_def   = bos_cfg.get("swing_definition", "")
+    sw_ex    = bos_cfg.get("example", "")
+    fvg_min  = fvg_cfg.get("min_gap_pct", 0.05)
+
     prompt = f"""Kamu adalah Hiura, analis struktur H1 ICT.
 Harga sekarang: {price}
 
-DATA CANDLE H1 (closed, terbaru di bawah):
+DATA CANDLE H1 (closed, terbaru di bawah — format: [idx] waktu ↑/↓ H:... L:... C:...):
 {h1_table}
 
 {_build_json_ctx(ctx)}
 
-{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU — analisis berurutan:
+{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU — ikuti RULES dari JSON di atas:
 
-1. BIAS H1: lihat struktur swing high/low. Higher highs/lows = bullish. Lower highs/lows = bearish.
+1. CARI SWING LOW/HIGH VALID menggunakan rules:
+   - swing_left={sw_left}: minimal {sw_left} candle SEBELUM candle X tidak ada yang lebih rendah (untuk swing low)
+   - swing_right={sw_right}: minimal {sw_right} candle SESUDAH candle X tidak ada yang lebih rendah
+   - Kedua syarat HARUS terpenuhi untuk swing valid
+   {f"- {sw_def}" if sw_def else ""}
+   {f"- CONTOH: {sw_ex}" if sw_ex else ""}
 
-2. BOS H1: apakah ada candle yang close-nya melewati swing high/low sebelumnya?
-   - BOS bullish: close > swing high terakhir yang signifikan
-   - BOS bearish: close < swing low terakhir yang signifikan
-   - Gunakan HARGA PERSIS dari data candle, jangan bulatkan
+2. BOS H1 (ikuti confirmation={bos_cfg.get("confirmation","close_candle")}):
+   - BOS bearish: cari swing low valid → ada candle yang CLOSE di bawah swing low itu
+   - BOS bullish: cari swing high valid → ada candle yang CLOSE di atas swing high itu
+   - Gunakan low/high PERSIS dari candle swing (field L: atau H: di tabel), JANGAN bulatkan
+   - BOS terbentuk di LEVEL SWING yang ditembus, bukan di level candle yang break
 
-3. FVG H1 (hanya sesuai arah BOS):
-   - FVG bullish: candle[i].H < candle[i+2].L (gap ke atas)
-   - FVG bearish: candle[i].L > candle[i+2].H (gap ke bawah)
-   - Cari max 3 FVG fresh (yang belum diisi harga)
-   - FVG harus SETELAH BOS terbentuk
-   - FVG diisi kalau candle close menembus zona (wick masuk = belum diisi)
+3. FVG H1 (hanya arah sesuai BOS, min_gap={fvg_min}%):
+   - FVG bearish: candle[i].L > candle[i+2].H — gap turun, harga tidak menyentuh zona ini
+   - FVG bullish: candle[i].H < candle[i+2].L — gap naik
+   - FVG harus SETELAH candle BOS terbentuk (idx > bos_candle_idx)
+   - FVG filled = ada candle yang close menembus zona (wick masuk = belum filled)
+   - Gap minimum {fvg_min}% dari harga
 
-4. SWING RANGE: setelah BOS, tandai:
-   - SH = high tertinggi setelah BOS terbentuk (sebelum retrace)
-   - SL = swing low sebelum BOS (yang membentuk struktur)
+4. SWING RANGE setelah BOS:
+   - BOS bearish: SH = high tertinggi SETELAH BOS candle, SL = swing low yang jadi BOS itu sendiri
+   - BOS bullish: SL = low terendah SETELAH BOS candle, SH = swing high yang jadi BOS
 
-5. WATCHLIST: harga berapa yang harus dipantau?
-   - Untuk BOS bullish: FVG yang relevan untuk retrace (wick dari atas ke bawah)
-   - Harga persis dari candle data
+5. WATCHLIST:
+   - BOS bearish: level FVG bearish untuk retrace naik (harga naik sentuh FVG dari bawah)
+   - BOS bullish: level FVG bullish untuk retrace turun
+   - Gunakan harga PERSIS dari candle
 
 Balas JSON murni:
 {{
@@ -326,6 +343,12 @@ def yusuf_entry(client: Groq, model: str, raw_data: dict,
                         f"entry={t.get('entry',0)} setup={t.get('setup','?')} "
                         f"notes={t.get('notes','')[:50]}\n")
 
+    logic  = ctx.get("logic_raw", {}) if ctx else {}
+    sl_cfg = logic.get("stop_loss", {})
+    tp_cfg = logic.get("take_profit", {})
+    min_rr = tp_cfg.get("min_rr", 2.0)
+    sl_buf = sl_cfg.get("buffer_pct", 0.0)
+
     prompt = f"""Kamu adalah Yusuf, entry sniper ICT.
 Harga sekarang: {price}
 Bias H1: {bias}
@@ -340,22 +363,20 @@ FVG H1 (hanya sebagai referensi zona, bukan syarat wajib):
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
 Tentukan entry paling presisi. Gunakan angka PERSIS dari data, jangan bulatkan.
 
-RULES ENTRY:
-- Entry saat MSS M5 terkonfirmasi — FVG H1 hanya sebagai info tambahan, bukan gate wajib
-- MSS di dalam FVG = setup lebih kuat (naikkan confidence), tapi di luar FVG tetap valid
+RULES ENTRY (dari logic_rules.json — WAJIB DIIKUTI):
+- Entry saat MSS terkonfirmasi
+- FVG H1 role: reference_only — info tambahan, bukan gate wajib
 - Bias bullish: entry limit di area MSS candle close atau sedikit di bawahnya
 - Bias bearish: entry limit di area MSS candle close atau sedikit di atasnya
-- Skip HANYA kalau MSS tidak terkonfirmasi atau RR < 2.0
 
-RULES SL:
-- Bias bullish: SL = LOW candle MSS
-- Bias bearish: SL = HIGH candle MSS
-- Tambah buffer dari rules jika ada
+RULES SL (dari logic_rules.json — WAJIB DIIKUTI):
+- Bias bullish: SL = low candle MSS. Buffer: {{sl_buf}}%
+- Bias bearish: SL = high candle MSS. Buffer: {{sl_buf}}%
 
-RULES TP:
-- Bias bullish: TP = swing high tertinggi sejak BOS H1 (liquidity di atas)
-- Bias bearish: TP = swing low terendah sejak BOS H1
-- Min RR = 2.0
+RULES TP (dari logic_rules.json — WAJIB DIIKUTI):
+- Bias bullish: TP = highest high sejak BOS H1
+- Bias bearish: TP = lowest low sejak BOS H1
+- Min RR = {{min_rr}} — skip kalau RR < {{min_rr}}
 
 Balas JSON murni:
 {{

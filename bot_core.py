@@ -171,9 +171,10 @@ class BotCore:
         """Return semua JSON config yang harus dibaca AI sebelum analisis."""
         import json
         return {
-            "rules":  json.dumps({k:v for k,v in self.rules.rules.items()  if not k.startswith("_")}, ensure_ascii=False),
-            "logic":  self.logic.get_context_for_ai(),
-            "prompts": json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False),
+            "rules":     json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "logic":     json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "logic_raw": {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},  # raw dict untuk AI baca field spesifik
+            "prompts":   json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, indent=2),
         }
 
     # ── Phase Handlers ───────────────────────────────────
