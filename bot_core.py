@@ -558,15 +558,17 @@ class BotCore:
             min_rr   = self.rules.tp_min_rr
             phase    = self._phase
 
-            # Ringkasan rules/logic
-            rules_summary = json.dumps(
-                {k: v for k, v in self.rules.rules.items() if not k.startswith("_")},
-                ensure_ascii=False, indent=None
-            )
-            logic_summary = json.dumps(
-                {k: v for k, v in self.logic.rules.items() if not k.startswith("_")},
-                ensure_ascii=False, indent=None
-            )
+            # Baca langsung dari file — pastikan data fresh
+            def _rjson(path):
+                try:
+                    with open(path, encoding="utf-8") as _f:
+                        d = json.load(_f)
+                    return {k:v for k,v in d.items() if not k.startswith("_")}
+                except Exception:
+                    return {}
+            rules_summary   = json.dumps(_rjson("data/rules.json"),       ensure_ascii=False)[:1000]
+            logic_summary   = json.dumps(_rjson("data/logic_rules.json"), ensure_ascii=False)[:1000]
+            prompts_summary = json.dumps(_rjson("data/prompts.json"),      ensure_ascii=False)[:600]
 
             watchlist_text = self.watchlist.summary()
 
@@ -590,11 +592,14 @@ STATUS BOT SAAT INI:
 - Total trade: {stats.get('total_trades',0)} | Win rate: {stats.get('win_rate',0):.0%}
 - Watchlist: {watchlist_text}
 
-RULES LENGKAP:
+RULES LENGKAP (data/rules.json):
 {rules_summary}
 
-LOGIC LENGKAP:
+LOGIC LENGKAP (data/logic_rules.json):
 {logic_summary}
+
+PROMPTS LENGKAP (data/prompts.json):
+{prompts_summary}
 
 KEMAMPUANMU:
 - Jika owner minta ubah rules/logic/prompts → langsung apply dengan format JSON di akhir response:

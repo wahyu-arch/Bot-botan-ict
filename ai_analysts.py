@@ -18,6 +18,31 @@ from groq import Groq
 logger = logging.getLogger(__name__)
 
 
+def _load_json_files() -> dict:
+    """Baca langsung dari file JSON di data/ — sumber kebenaran tunggal."""
+    import os
+    result = {}
+    files = {
+        "rules":  "data/rules.json",
+        "logic":  "data/logic_rules.json",
+        "prompts": "data/prompts.json",
+    }
+    for key, path in files.items():
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f)
+                # Strip metadata keys
+                result[key] = {k: v for k, v in raw.items() if not k.startswith("_")}
+            except Exception as e:
+                result[key] = {}
+                logger.warning(f"[JSON] Gagal baca {path}: {e}")
+        else:
+            result[key] = {}
+    result["logic_raw"] = result.get("logic", {})  # alias untuk akses field spesifik
+    return result
+
+
 def _build_json_ctx(ctx: dict) -> str:
     """Bangun konteks JSON lengkap untuk AI — rules, logic, dan prompts dari file JSON."""
     if not ctx:
@@ -92,7 +117,13 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     price = raw_data["price"]
 
     # Baca rules dari JSON untuk inject ke prompt
-    logic = ctx.get("logic_raw", {}) if ctx else {}
+    # Baca langsung dari file JSON — sumber kebenaran
+    json_data = _load_json_files()
+    ctx = json_data
+    prompt_extra = json_data.get("prompts", {}).get("hiura", {}).get("extra_instructions", "")
+    if prompt_extra and not prompt_ctx:
+        prompt_ctx = prompt_extra
+    logic = json_data.get("logic_raw", {})
     bos_cfg = logic.get("find_bos_h1", {})
     fvg_cfg = logic.get("find_fvg_h1", {})
     sw_left  = bos_cfg.get("swing_left",  8)
@@ -182,8 +213,18 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
                      bias_h1: str, ctx: dict = None, prompt_ctx: str = "") -> dict:
     """
     Senanan cari IDM di M5 dalam range SH-SL.
-    Dia sendiri yang tentukan IDM valid atau tidak.
     """
+    # Baca langsung dari file JSON
+    json_data = _load_json_files()
+    ctx = json_data
+    prompt_extra = json_data.get("prompts", {}).get("senanan", {}).get("extra_instructions", "")
+    if prompt_extra and not prompt_ctx:
+        prompt_ctx = prompt_extra
+    logic = json_data.get("logic_raw", {})
+    idm_cfg = logic.get("find_idm_m5", {})
+    direction_cfg = idm_cfg.get(m5_idm_direction, {})
+    gap_min = direction_cfg.get("gap_min_candles", 1)
+    touch_rule = direction_cfg.get("touch_rule", "wick_or_body")
     m5_table = _candle_table(raw_data["m5"], limit=100)
     price = raw_data["price"]
 
@@ -250,8 +291,15 @@ def shina_bos_mss(client: Groq, model: str, raw_data: dict,
                   sh: float, sl: float, prompt_ctx: str = "") -> dict:
     """
     Shina analisis BOS/MSS di M5 setelah IDM disentuh.
-    Dia yang memutuskan lanjut ke entry atau cari IDM baru.
     """
+    # Baca langsung dari file JSON
+    json_data = _load_json_files()
+    prompt_extra = json_data.get("prompts", {}).get("shina", {}).get("extra_instructions", "")
+    if prompt_extra and not prompt_ctx:
+        prompt_ctx = prompt_extra
+    logic = json_data.get("logic_raw", {})
+    bos_m5_cfg = logic.get("find_bos_m5", {})
+    mss_m5_cfg = logic.get("find_mss_m5", {})
     m5_table = _candle_table(raw_data["m5"], limit=80)
     price = raw_data["price"]
     watch_level = idm_info.get("watch_level", 0)
@@ -343,7 +391,13 @@ def yusuf_entry(client: Groq, model: str, raw_data: dict,
                         f"entry={t.get('entry',0)} setup={t.get('setup','?')} "
                         f"notes={t.get('notes','')[:50]}\n")
 
-    logic  = ctx.get("logic_raw", {}) if ctx else {}
+    # Baca langsung dari file JSON
+    json_data = _load_json_files()
+    ctx = json_data
+    prompt_extra = json_data.get("prompts", {}).get("yusuf", {}).get("extra_instructions", "")
+    if prompt_extra and not prompt_ctx:
+        prompt_ctx = prompt_extra
+    logic = json_data.get("logic_raw", {})
     sl_cfg = logic.get("stop_loss", {})
     tp_cfg = logic.get("take_profit", {})
     min_rr = tp_cfg.get("min_rr", 2.0)
@@ -484,6 +538,13 @@ def katyusha_review(openrouter_key: str, bot_state: dict,
                     raw_data: dict, all_ai_data: dict,
                     rules_current: dict = None,
                     logic_current: dict = None) -> dict:
+    # Selalu baca langsung dari file — ini yang paling akurat
+    json_data = _load_json_files()
+    if not rules_current:
+        rules_current = json_data.get("rules", {})
+    if not logic_current:
+        logic_current = json_data.get("logic", {})
+    prompts_current = json_data.get("prompts", {})
     """
     Katyusha review market + analisis AI + rules + logic.
     Authority penuh: bisa edit/tambah/hapus rules dan logic langsung.
@@ -521,12 +582,17 @@ def katyusha_review(openrouter_key: str, bot_state: dict,
     rules_text = json.dumps(
         {k:v for k,v in (rules_current or {}).items() if not k.startswith("_")},
         ensure_ascii=False, indent=2
-    )[:800]
+    )[:1000]
 
     logic_text = json.dumps(
         {k:v for k,v in (logic_current or {}).items() if not k.startswith("_")},
         ensure_ascii=False, indent=2
-    )[:800]
+    )[:1000]
+
+    prompts_text = json.dumps(
+        {k:v for k,v in prompts_current.items() if not k.startswith("_")},
+        ensure_ascii=False, indent=2
+    )[:600]
 
     prompt = f"""Kamu adalah Katyusha, supervisor ICT trading bot dengan authority penuh.
 Kamu pakai Claude Sonnet — reasoning kamu lebih kuat dari AI Groq lain di tim.
@@ -546,11 +612,14 @@ Shina (BOS/MSS guard): {shina_sum}
 WATCHLIST AKTIF:
 {watchlist_text}
 
-RULES SAAT INI (parameter angka):
+RULES SAAT INI (data/rules.json):
 {rules_text}
 
-LOGIC SAAT INI (cara kerja/kondisi):
+LOGIC SAAT INI (data/logic_rules.json):
 {logic_text}
+
+PROMPTS SAAT INI (data/prompts.json — instruksi AI):
+{prompts_text}
 
 TUGASMU — cek semua secara menyeluruh:
 
