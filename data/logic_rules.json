@@ -1,9 +1,8 @@
 {
-  "_version": 2,
+  "_version": 3,
   "_last_updated": null,
-  "_update_reason": "v28→v29: entry tidak lagi wajib di FVG, FVG hanya zona referensi",
+  "_update_reason": "Perjelas definisi swing BOS agar AI baca rules dengan benar",
   "_update_count": 0,
-
   "find_bos_h1": {
     "method": "swing_break",
     "swing_left": 8,
@@ -12,9 +11,10 @@
     "confirmation": "close_candle",
     "bullish_condition": "close > last_swing_high",
     "bearish_condition": "close < last_swing_low",
-    "comment": "BOS H1: close candle melewati swing high/low. Swing pakai 8 kiri 8 kanan."
+    "comment": "BOS H1: close candle melewati swing high/low. Swing pakai 8 kiri 8 kanan.",
+    "swing_definition": "Swing low valid = candle X punya low terendah, MINIMAL swing_left=8 candle sebelumnya tidak ada yang lebih rendah, DAN minimal swing_right=8 candle sesudahnya tidak ada yang lebih rendah. BOS bearish = ada candle yang CLOSE di bawah swing low valid tersebut. Gunakan low PERSIS dari candle swing — jangan bulatkan.",
+    "example": "Contoh: candle idx=10 buat low 0.1952. Candle idx=1..9 tidak ada yang low < 0.1952 (swing_left ok). Candle idx=11..18 tidak ada yang low < 0.1952 (swing_right=8 ok). Candle idx=19 close di 0.1890 < 0.1952 → BOS bearish terkonfirmasi di 0.1952."
   },
-
   "find_fvg_h1": {
     "method": "three_candle_gap",
     "bullish_condition": "candle1_high < candle3_low",
@@ -28,7 +28,6 @@
     "role": "reference_zone_only",
     "comment": "FVG H1 digunakan sebagai referensi zona saja — bukan filter wajib entry. Entry tetap valid di luar FVG jika MSS terkonfirmasi."
   },
-
   "find_idm_m5": {
     "method": "state_machine",
     "bullish": {
@@ -50,7 +49,6 @@
     "max_search_candles": 200,
     "comment": "IDM M5: candle A → gap → tembus. Watch level = low/high candle A."
   },
-
   "find_bos_m5": {
     "method": "freeze_range",
     "freeze_from": "idm_start_candle",
@@ -60,7 +58,6 @@
     "require_idm_first": true,
     "comment": "BOS M5: setelah IDM disentuh, freeze range. BOS = close melewati batas freeze."
   },
-
   "find_mss_m5": {
     "enabled": true,
     "bullish_mss": "close_above_freeze_high_after_bearish_bos",
@@ -69,7 +66,6 @@
     "on_opposite_break": "reset_idm_hunt",
     "comment": "MSS M5: setelah BOS M5, IDM baru disentuh, harga break ke arah berlawanan = MSS. Entry langsung tanpa cek FVG."
   },
-
   "entry": {
     "condition": "mss_confirmed",
     "fvg_role": "reference_only",
@@ -79,7 +75,6 @@
     "skip_if_outside_fvg": false,
     "comment": "Entry saat MSS terkonfirmasi. FVG hanya info tambahan untuk AI, bukan gate wajib."
   },
-
   "stop_loss": {
     "source": "mss_candle_extreme",
     "long_sl": "low_of_mss_candle",
@@ -87,7 +82,6 @@
     "buffer_pct": 0.0,
     "comment": "SL = low/high candle MSS."
   },
-
   "take_profit": {
     "target": "structure_high_low_since_bos",
     "long_tp": "highest_high_since_bos_h1",
@@ -95,7 +89,6 @@
     "min_rr": 2.0,
     "comment": "TP = high/low tertinggi sejak BOS H1. Min RR 2:1."
   },
-
   "bos_h1_invalidation": {
     "bullish_invalid": "close_h1_below_sl_before_bos",
     "bearish_invalid": "close_h1_above_sh_before_bos",
