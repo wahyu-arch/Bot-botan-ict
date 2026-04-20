@@ -100,7 +100,7 @@ class BotCore:
         self.symbol = symbol
         self.paper  = paper
         self._katyusha_key      = os.environ.get("OPENROUTER_API_KEY", "")
-        self._last_katyusha_ts  = 0.0   # timestamp review terakhir
+        self._last_katyusha_ts  = __import__("time").time()  # mulai dari sekarang, bukan epoch
         self._katyusha_interval = 5 * 3600  # 5 jam dalam detik
 
         # State

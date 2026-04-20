@@ -574,9 +574,9 @@ Balas JSON murni:
                 "model": "anthropic/claude-sonnet-4-6",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.15,
-                "max_tokens": 900,
+                "max_tokens": 2000,
             },
-            timeout=35,
+            timeout=45,
         )
         raw = resp.json()["choices"][0]["message"]["content"].strip()
         parsed = _parse_json(raw)
@@ -660,9 +660,9 @@ Balas JSON murni:
                 "model": "anthropic/claude-sonnet-4-6",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.15,
-                "max_tokens": 700,
+                "max_tokens": 1500,
             },
-            timeout=30,
+            timeout=40,
         )
         raw = resp.json()["choices"][0]["message"]["content"].strip()
         parsed = _parse_json(raw)
