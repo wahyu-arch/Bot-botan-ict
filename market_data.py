@@ -69,8 +69,8 @@ class MarketDataFetcher:
 
     def _get_bybit_context(self) -> dict:
         """Ambil klines H1 dan M5 dari Bybit."""
-        h1_candles = self._fetch_bybit_klines(interval="60", limit=50)
-        m5_candles  = self._fetch_bybit_klines(interval="5",  limit=30)
+        h1_candles = self._fetch_bybit_klines(interval="60", limit=200)
+        m5_candles  = self._fetch_bybit_klines(interval="5",  limit=200)
 
         if not h1_candles or not m5_candles:
             logger.warning("Bybit klines kosong, fallback ke mock")
@@ -132,8 +132,8 @@ class MarketDataFetcher:
         return {}
 
     def _get_mock_context(self) -> dict:
-        h1_candles = self._generate_mock_candles(50, 60)
-        m5_candles  = self._generate_mock_candles(30, 5)
+        h1_candles = self._generate_mock_candles(200, 60)
+        m5_candles  = self._generate_mock_candles(200, 5)
         last = m5_candles[-1]["close"]
         spread = last * 0.00005  # 0.005% spread simulasi
 

@@ -74,7 +74,7 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     Hiura analisis H1 dari data mentah.
     Dia sendiri yang tentukan ada BOS atau tidak, FVG mana yang valid, range SH/SL.
     """
-    h1_table = _candle_table(raw_data["h1"], limit=50)
+    h1_table = _candle_table(raw_data["h1"], limit=100)
     price = raw_data["price"]
 
     prompt = f"""Kamu adalah Hiura, analis struktur H1 ICT.
@@ -128,7 +128,7 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=600, temp=0.2)
+    raw = _call(client, model, prompt, max_tokens=800, temp=0.2)
     parsed = _parse_json(raw)
     if not parsed:
         logger.warning(f"[HIURA] Parse gagal: {raw[:100]}")
@@ -153,7 +153,7 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
     Senanan cari IDM di M5 dalam range SH-SL.
     Dia sendiri yang tentukan IDM valid atau tidak.
     """
-    m5_table = _candle_table(raw_data["m5"], limit=60)
+    m5_table = _candle_table(raw_data["m5"], limit=100)
     price = raw_data["price"]
 
     prompt = f"""Kamu adalah Senanan, spesialis IDM (Inducement) di M5 ICT.
@@ -198,7 +198,7 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=400, temp=0.2)
+    raw = _call(client, model, prompt, max_tokens=700, temp=0.2)
     parsed = _parse_json(raw)
     if not parsed:
         logger.warning(f"[SENANAN] Parse gagal: {raw[:100]}")
@@ -221,7 +221,7 @@ def shina_bos_mss(client: Groq, model: str, raw_data: dict,
     Shina analisis BOS/MSS di M5 setelah IDM disentuh.
     Dia yang memutuskan lanjut ke entry atau cari IDM baru.
     """
-    m5_table = _candle_table(raw_data["m5"], limit=40)
+    m5_table = _candle_table(raw_data["m5"], limit=80)
     price = raw_data["price"]
     watch_level = idm_info.get("watch_level", 0)
     idm_type = idm_info.get("idm_type", "")
@@ -268,7 +268,7 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=400, temp=0.2)
+    raw = _call(client, model, prompt, max_tokens=700, temp=0.2)
     parsed = _parse_json(raw)
     if not parsed:
         logger.warning(f"[SHINA] Parse gagal: {raw[:100]}")
@@ -471,8 +471,8 @@ def katyusha_review(openrouter_key: str, bot_state: dict,
 
     phase   = bot_state.get("phase", "unknown")
     price   = raw_data.get("price", 0)
-    h1_table = _candle_table(raw_data.get("h1", []), limit=30)
-    m5_table = _candle_table(raw_data.get("m5", []), limit=20)
+    h1_table = _candle_table(raw_data.get("h1", []), limit=50)
+    m5_table = _candle_table(raw_data.get("m5", []), limit=40)
 
     hiura_sum   = json.dumps(all_ai_data.get("hiura",   {}), ensure_ascii=False)[:400]
     senanan_sum = json.dumps(all_ai_data.get("senanan", {}), ensure_ascii=False)[:300]
