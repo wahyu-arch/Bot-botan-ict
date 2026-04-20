@@ -14,6 +14,7 @@ import json
 import logging
 import re
 from groq import Groq
+from candle_replay import build_h1_analysis, build_m5_analysis, format_replay_for_ai
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,14 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     h1_table = _candle_table(raw_data["h1"], limit=100)
     price = raw_data["price"]
 
+    # Python replay H1 kiri ke kanan — hasilnya dikirim ke Hiura
+    try:
+        h1_replay = build_h1_analysis(raw_data["h1"], json_data.get("logic_raw", {}))
+        replay_text = format_replay_for_ai(h1_result=h1_replay)
+    except Exception as _e:
+        replay_text = f"(replay error: {_e})"
+        h1_replay = {}
+
     # Baca rules dari JSON untuk inject ke prompt
     # Baca langsung dari file JSON — sumber kebenaran
     json_data = _load_json_files()
@@ -135,27 +144,33 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     prompt = f"""Kamu adalah Hiura, analis struktur H1 ICT.
 Harga sekarang: {price}
 
-DATA CANDLE H1 (closed, terbaru di bawah — format: [idx] waktu ↑/↓ H:... L:... C:...):
+HASIL REPLAY H1 (Python sudah baca kiri ke kanan — ini yang paling akurat):
+{replay_text}
+
+DATA CANDLE H1 LENGKAP (untuk verifikasi):
 {h1_table}
 
 {_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU — ikuti RULES dari JSON di atas:
 
-1. CARI SWING LOW/HIGH VALID menggunakan rules:
+1. BACA HASIL REPLAY di atas — Python sudah hitung swing valid dan BOS menggunakan rules swing_left={sw_left} swing_right={sw_right}.
+   GUNAKAN hasil replay sebagai acuan utama. Verifikasi dengan candle kalau perlu.
+
+2. CARI SWING LOW/HIGH VALID (konfirmasi dari replay):
    - swing_left={sw_left}: minimal {sw_left} candle SEBELUM candle X tidak ada yang lebih rendah (untuk swing low)
    - swing_right={sw_right}: minimal {sw_right} candle SESUDAH candle X tidak ada yang lebih rendah
    - Kedua syarat HARUS terpenuhi untuk swing valid
    {f"- {sw_def}" if sw_def else ""}
    {f"- CONTOH: {sw_ex}" if sw_ex else ""}
 
-2. BOS H1 (ikuti confirmation={bos_cfg.get("confirmation","close_candle")}):
+3. BOS H1 — gunakan level PERSIS dari replay di atas (swing_level field):
    - BOS bearish: cari swing low valid → ada candle yang CLOSE di bawah swing low itu
    - BOS bullish: cari swing high valid → ada candle yang CLOSE di atas swing high itu
    - Gunakan low/high PERSIS dari candle swing (field L: atau H: di tabel), JANGAN bulatkan
    - BOS terbentuk di LEVEL SWING yang ditembus, bukan di level candle yang break
 
-3. FVG H1 (hanya arah sesuai BOS, min_gap={fvg_min}%):
+4. FVG H1 — gunakan FVG dari replay di atas (sudah difilter arah dan min_gap):
    - FVG bearish: candle[i].L > candle[i+2].H — gap turun, harga tidak menyentuh zona ini
    - FVG bullish: candle[i].H < candle[i+2].L — gap naik
    - FVG harus SETELAH candle BOS terbentuk (idx > bos_candle_idx)
@@ -234,17 +249,21 @@ Bias H1: {bias_h1}
 Range yang diberikan Hiura: SH={sh} SL={sl}
 Cari IDM arah: {m5_idm_direction} ({"bearish karena H1 bullish - M5 retrace turun" if m5_idm_direction == "bearish" else "bullish karena H1 bearish - M5 retrace naik"})
 
-DATA CANDLE M5 (closed, terbaru di bawah):
+HASIL REPLAY M5 (Python sudah baca kiri ke kanan):
+{replay_m5_text}
+
+DATA CANDLE M5 (untuk verifikasi):
 {m5_table}
 
 {_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
 Cari IDM {m5_idm_direction} di M5 dalam range harga {sl}–{sh}.
+PRIORITAS: Gunakan hasil replay Python di atas. Konfirmasi watch_level dan set watchlist.
 
-DEFINISI IDM:
+DEFINISI IDM (verifikasi):
 - IDM {m5_idm_direction}: 
-  {"Candle A buat swing HIGH → minimal 1 candle tidak tembus high A (close maupun wick) → candle berikutnya TEMBUS high A → IDM terbentuk! Level watch = LOW candle A (karena harga akan retrace ke bawah sentuh low ini)" if m5_idm_direction == "bearish" else "Candle A buat swing LOW → minimal 1 candle tidak tembus low A → candle berikutnya TEMBUS low A → IDM terbentuk! Level watch = HIGH candle A"}
+  {"Candle A buat swing HIGH → minimal 1 candle tidak tembus high A → tembus → Watch level = LOW candle A" if m5_idm_direction == "bearish" else "Candle A buat swing LOW → gap → tembus → Watch level = HIGH candle A"}
 
 - Cari dari candle terbaru (paling bawah tabel) ke atas
 - IDM harus dalam range harga {sl}–{sh}
