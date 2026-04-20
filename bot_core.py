@@ -167,6 +167,15 @@ class BotCore:
     def _logic_ctx(self) -> str:
         return self.logic.get_context_for_ai()
 
+    def _full_ctx(self) -> dict:
+        """Return semua JSON config yang harus dibaca AI sebelum analisis."""
+        import json
+        return {
+            "rules":  json.dumps({k:v for k,v in self.rules.rules.items()  if not k.startswith("_")}, ensure_ascii=False),
+            "logic":  self.logic.get_context_for_ai(),
+            "prompts": json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False),
+        }
+
     # ── Phase Handlers ───────────────────────────────────
 
     def _katyusha_apply_changes(self, k_result: dict):
@@ -278,7 +287,7 @@ class BotCore:
 
         result = hiura_h1_analysis(
             self.clients[0], self.model_ai1,
-            raw_data, self._logic_ctx(),
+            raw_data, self._full_ctx(),
             prompt_ctx=self.prompts.build_context('hiura')
         )
         self._hiura_data = result
@@ -376,7 +385,7 @@ class BotCore:
         result = senanan_idm_hunt(
             self.clients[1], self.model_ai2,
             raw_data, sh, sl, m5_dir, bias,
-            self._logic_ctx(),
+            self._full_ctx(),
             prompt_ctx=self.prompts.build_context('senanan')
         )
         self._senanan_data = result
@@ -458,7 +467,7 @@ class BotCore:
         result = yusuf_entry(
             self.clients[3], self.model_json,
             raw_data, self._hiura_data, self._shina_data,
-            trade_mem, self._logic_ctx(),
+            trade_mem, self._full_ctx(),
             prompt_ctx=self.prompts.build_context('yusuf')
         )
         self._push("ai4", "Yusuf", result.get("chat_msg", ""), 4)

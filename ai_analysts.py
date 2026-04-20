@@ -18,6 +18,20 @@ from groq import Groq
 logger = logging.getLogger(__name__)
 
 
+def _build_json_ctx(ctx: dict) -> str:
+    """Bangun konteks JSON lengkap untuk AI — rules, logic, dan prompts dari file JSON."""
+    if not ctx:
+        return ""
+    parts = []
+    if ctx.get("rules"):
+        parts.append(f"=== RULES (parameter trading) ===\n{ctx['rules']}")
+    if ctx.get("logic"):
+        parts.append(f"=== LOGIC (cara deteksi BOS/FVG/IDM) ===\n{ctx['logic']}")
+    if ctx.get("prompts"):
+        parts.append(f"=== PROMPTS (instruksi khusus) ===\n{ctx['prompts']}")
+    return "\n\n".join(parts) if parts else ""
+
+
 # ── Helpers ─────────────────────────────────────────────
 
 def _call(client: Groq, model: str, prompt: str,
@@ -69,7 +83,7 @@ def _candle_table(candles: list, limit: int = 40) -> str:
 # ══════════════════════════════════════════════════════════
 
 def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
-                      logic_context: str = "", prompt_ctx: str = "") -> dict:
+                      ctx: dict = None, prompt_ctx: str = "") -> dict:
     """
     Hiura analisis H1 dari data mentah.
     Dia sendiri yang tentukan ada BOS atau tidak, FVG mana yang valid, range SH/SL.
@@ -83,7 +97,7 @@ Harga sekarang: {price}
 DATA CANDLE H1 (closed, terbaru di bawah):
 {h1_table}
 
-{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+{_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU — analisis berurutan:
 
@@ -148,7 +162,7 @@ Balas JSON murni:
 
 def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
                      sh: float, sl: float, m5_idm_direction: str,
-                     bias_h1: str, logic_context: str = "", prompt_ctx: str = "") -> dict:
+                     bias_h1: str, ctx: dict = None, prompt_ctx: str = "") -> dict:
     """
     Senanan cari IDM di M5 dalam range SH-SL.
     Dia sendiri yang tentukan IDM valid atau tidak.
@@ -165,7 +179,7 @@ Cari IDM arah: {m5_idm_direction} ({"bearish karena H1 bullish - M5 retrace turu
 DATA CANDLE M5 (closed, terbaru di bawah):
 {m5_table}
 
-{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+{_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
 Cari IDM {m5_idm_direction} di M5 dalam range harga {sl}–{sh}.
@@ -288,7 +302,7 @@ Balas JSON murni:
 
 def yusuf_entry(client: Groq, model: str, raw_data: dict,
                 hiura_data: dict, shina_data: dict,
-                trade_memory: list, logic_context: str = "", prompt_ctx: str = "") -> dict:
+                trade_memory: list, ctx: dict = None, prompt_ctx: str = "") -> dict:
     """
     Yusuf tentukan entry, SL, TP.
     Dia punya akses ke memory trade sebelumnya untuk belajar.
@@ -321,7 +335,7 @@ FVG H1 (hanya sebagai referensi zona, bukan syarat wajib):
 {fvg_text}
 
 {mem_text}
-{f"CONTEXT RULES:{chr(10)}{logic_context}" if logic_context else ""}
+{_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
 Tentukan entry paling presisi. Gunakan angka PERSIS dari data, jangan bulatkan.

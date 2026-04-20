@@ -224,11 +224,7 @@ WAJIB: balas HANYA JSON murni — logic_rules lengkap yang sudah diupdate:
                         logger.info(f"[LOGIC DIFF] {key}.{subkey}: {old_val} → {new_val}")
 
     def get_context_for_ai(self) -> str:
-        """Return ringkasan logic rules untuk dikirim ke AI panel sebagai konteks."""
-        r = self._rules
-        lines = [f"Logic Rules v{r.get('_version',1)}:"]
-        for section in ["find_bos_h1","find_fvg_h1","find_idm_m5","find_bos_m5","entry","stop_loss","take_profit"]:
-            d = r.get(section, {})
-            comment = d.get("comment", "")
-            lines.append(f"  [{section}] {comment}")
-        return "\n".join(lines)
+        """Return full JSON logic_rules untuk AI — ini adalah otak cara kerja bot."""
+        import json
+        r = {k: v for k, v in self._rules.items() if not k.startswith("_")}
+        return json.dumps(r, ensure_ascii=False, indent=None)
