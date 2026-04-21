@@ -594,20 +594,19 @@ def katyusha_review(openrouter_key: str, bot_state: dict,
         for w in bot_state.get("watchlist", [])
     ]) or "  (kosong)"
 
-    rules_text = json.dumps(
+    # Kirim FULL JSON — Katyusha harus lihat semua, tidak boleh dipotong
+    rules_text   = json.dumps(
         {k:v for k,v in (rules_current or {}).items() if not k.startswith("_")},
         ensure_ascii=False, indent=2
-    )[:1000]
-
-    logic_text = json.dumps(
+    )
+    logic_text   = json.dumps(
         {k:v for k,v in (logic_current or {}).items() if not k.startswith("_")},
         ensure_ascii=False, indent=2
-    )[:1000]
-
+    )
     prompts_text = json.dumps(
         {k:v for k,v in prompts_current.items() if not k.startswith("_")},
         ensure_ascii=False, indent=2
-    )[:600]
+    )
 
     prompt = f"""Kamu adalah Katyusha, supervisor ICT trading bot dengan authority penuh.
 Kamu pakai Claude Sonnet — reasoning kamu lebih kuat dari AI Groq lain di tim.
@@ -742,10 +741,10 @@ Root cause: {debrief.get('root_cause','')}
 New rule suggested: {debrief.get('new_rule','')}
 
 Rules saat ini (ringkasan):
-{json.dumps({k:v for k,v in rules_current.items() if not k.startswith('_')}, ensure_ascii=False)[:400]}
+{json.dumps({k:v for k,v in rules_current.items() if not k.startswith('_')}, ensure_ascii=False, indent=2)}
 
-Logic saat ini (ringkasan):
-{json.dumps({k:v for k,v in logic_current.items() if not k.startswith('_')}, ensure_ascii=False)[:400]}
+Logic saat ini (FULL):
+{json.dumps({k:v for k,v in logic_current.items() if not k.startswith('_')}, ensure_ascii=False, indent=2)}
 
 TUGASMU:
 Berikan evaluasi mendalam:

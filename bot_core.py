@@ -173,10 +173,11 @@ class BotCore:
         """Return semua JSON config + replay state untuk AI."""
         import json
         return {
-            "rules":      json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
-            "logic":      json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            # Full JSON — tidak dipotong — semua AI harus lihat seluruh file
+            "rules":      json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
+            "logic":      json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "logic_raw":  {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},
-            "prompts":    json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "prompts":    json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "replay_text": replay_text,  # hasil replay engine untuk Hiura
         }
 
@@ -684,9 +685,10 @@ class BotCore:
                     return {k:v for k,v in d.items() if not k.startswith("_")}
                 except Exception:
                     return {}
-            rules_summary   = json.dumps(_rjson("data/rules.json"),       ensure_ascii=False)[:1000]
-            logic_summary   = json.dumps(_rjson("data/logic_rules.json"), ensure_ascii=False)[:1000]
-            prompts_summary = json.dumps(_rjson("data/prompts.json"),      ensure_ascii=False)[:600]
+            # Full JSON untuk Katyusha — tidak dipotong
+            rules_summary   = json.dumps(_rjson("data/rules.json"),       ensure_ascii=False, separators=(',',':'))
+            logic_summary   = json.dumps(_rjson("data/logic_rules.json"), ensure_ascii=False, separators=(',',':'))
+            prompts_summary = json.dumps(_rjson("data/prompts.json"),      ensure_ascii=False, separators=(',',':'))
 
             watchlist_text = self.watchlist.summary()
 
