@@ -1,360 +1,425 @@
 """
-CandleReplay — Python replay candle kiri ke kanan, hasilnya dikirim ke AI.
+CandleReplay — Replay candle satu per satu kiri ke kanan.
 
-AI tidak perlu baca semua candle mentah — Python sudah deteksi:
-- Swing high/low valid (swing_left + swing_right)
-- IDM state machine
-- BOS/MSS
-- FVG
+Bukan analisis semua sekaligus. Bot "hidup" di setiap candle,
+berhenti saat kondisi terpenuhi, lanjut dari sana.
 
-AI menerima HASIL replay, bukan raw candle.
-AI tugasnya: interpretasi + keputusan + watchlist.
+State machine:
+  SCAN_BOS     → replay candle H1 satu per satu, cari swing + BOS
+  WAIT_FVG     → BOS terbentuk, pantau candle baru, tunggu FVG disentuh
+  IDM_HUNT     → FVG disentuh, replay M5 cari IDM
+  BOS_GUARD    → IDM disentuh, tunggu BOS/MSS M5
+  ENTRY        → MSS terkonfirmasi, hitung entry
 """
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-def find_swings(candles: list, swing_left: int = 8, swing_right: int = 8) -> dict:
+# ── Field helpers (support h/high, l/low, c/close) ─────
+
+def _h(c): return c.get("high", c.get("h", 0))
+def _l(c): return c.get("low",  c.get("l", 0))
+def _c(c): return c.get("close",c.get("c", 0))
+def _o(c): return c.get("open", c.get("o", 0))
+def _ts(c): return c.get("ts", "")
+
+
+# ── Swing detection ─────────────────────────────────────
+
+def is_swing_high(candles: list, idx: int, left: int, right: int) -> bool:
+    """Candle idx adalah swing high jika lebih tinggi dari L kiri dan R kanan."""
+    h = _h(candles[idx])
+    left_ok  = all(_h(candles[j]) < h for j in range(max(0, idx-left), idx))
+    right_ok = all(_h(candles[j]) < h for j in range(idx+1, min(len(candles), idx+right+1)))
+    return left_ok and right_ok and len(range(max(0,idx-left),idx)) == left and \
+           len(range(idx+1, min(len(candles), idx+right+1))) == right
+
+
+def is_swing_low(candles: list, idx: int, left: int, right: int) -> bool:
+    """Candle idx adalah swing low jika lebih rendah dari L kiri dan R kanan."""
+    l = _l(candles[idx])
+    left_ok  = all(_l(candles[j]) > l for j in range(max(0, idx-left), idx))
+    right_ok = all(_l(candles[j]) > l for j in range(idx+1, min(len(candles), idx+right+1)))
+    return left_ok and right_ok and len(range(max(0,idx-left),idx)) == left and \
+           len(range(idx+1, min(len(candles), idx+right+1))) == right
+
+
+# ── FVG detection ────────────────────────────────────────
+
+def find_fvg_at(candles: list, idx: int, direction: str, min_gap_pct: float = 0.05) -> dict | None:
     """
-    Replay kiri ke kanan, temukan swing high/low valid.
-    Swing valid = N candle kiri tidak lebih tinggi/rendah, DAN N candle kanan juga.
-    Return: {"swing_highs": [(idx, price)], "swing_lows": [(idx, price)]}
+    Cek apakah ada FVG yang terbentuk di candle idx (C1=idx-2, C2=idx-1, C3=idx).
+    FVG bearish: C1.low > C3.high
+    FVG bullish: C1.high < C3.low
+    """
+    if idx < 2:
+        return None
+    c1, c3 = candles[idx-2], candles[idx]
+    if direction == "bearish":
+        if _l(c1) > _h(c3):
+            high = _l(c1)
+            low  = _h(c3)
+            mid  = (high + low) / 2
+            gap_pct = (high - low) / mid * 100
+            if gap_pct >= min_gap_pct:
+                return {"type": "bearish", "high": round(high,8), "low": round(low,8),
+                        "mid": round(mid,8), "gap_pct": round(gap_pct,4),
+                        "formed_at": idx, "ts": _ts(c1), "filled": False}
+    elif direction == "bullish":
+        if _h(c1) < _l(c3):
+            low  = _h(c1)
+            high = _l(c3)
+            mid  = (high + low) / 2
+            gap_pct = (high - low) / mid * 100
+            if gap_pct >= min_gap_pct:
+                return {"type": "bullish", "high": round(high,8), "low": round(low,8),
+                        "mid": round(mid,8), "gap_pct": round(gap_pct,4),
+                        "formed_at": idx, "ts": _ts(c1), "filled": False}
+    return None
+
+
+def check_fvg_filled(fvg: dict, candle: dict) -> bool:
+    """
+    FVG filled = ada candle yang CLOSE menembus zona FVG.
+    Wick boleh masuk (wick touch = belum filled).
+    """
+    cl = _c(candle)
+    if fvg["type"] == "bearish":
+        return cl > fvg["high"]   # close di atas FVG bearish = filled
+    else:
+        return cl < fvg["low"]    # close di bawah FVG bullish = filled
+
+
+def check_fvg_touched(fvg: dict, candle: dict) -> bool:
+    """
+    FVG touched = wick atau body masuk ke zona.
+    Untuk BOS bearish: harga naik retrace, wick atas masuk FVG bearish.
+    """
+    if fvg["type"] == "bearish":
+        return _h(candle) >= fvg["low"]   # wick atas masuk ke bawah FVG
+    else:
+        return _l(candle) <= fvg["high"]  # wick bawah masuk ke atas FVG
+
+
+# ── IDM detection (state machine) ───────────────────────
+
+def find_idm_replay(candles: list, direction: str,
+                    gap_min: int = 1, max_search: int = 50) -> dict | None:
+    """
+    Replay M5 kiri ke kanan cari IDM.
+    Berhenti saat IDM terbentuk.
     """
     n = len(candles)
-    swing_highs = []
-    swing_lows  = []
-
-    for i in range(swing_left, n - swing_right):
-        c = candles[i]
-
-        # Cek swing high
-        is_sh = all(candles[j]["high"] < c["high"] for j in range(i - swing_left, i)) and \
-                all(candles[j]["high"] < c["high"] for j in range(i + 1, i + swing_right + 1))
-        if is_sh:
-            swing_highs.append((i, c["high"], c.get("ts", "")))
-
-        # Cek swing low
-        is_sl = all(candles[j]["low"] > c["low"] for j in range(i - swing_left, i)) and \
-                all(candles[j]["low"] > c["low"] for j in range(i + 1, i + swing_right + 1))
-        if is_sl:
-            swing_lows.append((i, c["low"], c.get("ts", "")))
-
-    return {"swing_highs": swing_highs, "swing_lows": swing_lows}
-
-
-def find_bos(candles: list, swing_left: int = 8, swing_right: int = 8) -> dict | None:
-    """
-    Replay kiri ke kanan — temukan BOS terbaru.
-    BOS = close candle melewati swing high/low valid terakhir.
-    Return dict BOS atau None.
-    """
-    swings = find_swings(candles, swing_left, swing_right)
-    sh_list = swings["swing_highs"]
-    sl_list = swings["swing_lows"]
-
-    if not sh_list and not sl_list:
-        return None
-
-    # Replay kiri ke kanan — cari BOS dari candle ke-N setelah swing terbentuk
-    # BOS bearish: close di bawah swing low valid terakhir
-    # BOS bullish: close di atas swing high valid terakhir
-
-    last_bos = None
-
-    for i in range(swing_left + swing_right + 1, len(candles)):
-        c = candles[i]
-
-        # Swing low yang terbentuk sebelum candle i (dengan swing_right sudah terpenuhi)
-        valid_sl = [(idx, price, ts) for idx, price, ts in sl_list
-                    if idx + swing_right < i]
-        valid_sh = [(idx, price, ts) for idx, price, ts in sh_list
-                    if idx + swing_right < i]
-
-        if valid_sl:
-            last_sl_idx, last_sl_price, last_sl_ts = valid_sl[-1]
-            if c["close"] < last_sl_price:
-                # BOS bearish terkonfirmasi
-                # SH = high tertinggi setelah BOS candle sebelumnya
-                post_sh = [candles[j]["high"] for j in range(last_sl_idx, i + 1)]
-                sh_since_bos = max(post_sh) if post_sh else c["high"]
-
-                # SH sebelum swing low (untuk invalidasi)
-                pre_sh = [(idx, p) for idx, p, _ in valid_sh if idx < last_sl_idx]
-                sh_before_bos = pre_sh[-1][1] if pre_sh else c["high"]
-
-                last_bos = {
-                    "type": "bearish_bos",
-                    "direction": "bearish",
-                    "swing_level": round(last_sl_price, 6),
-                    "swing_idx": last_sl_idx,
-                    "swing_ts": last_sl_ts,
-                    "bos_candle_idx": i,
-                    "bos_close": round(c["close"], 6),
-                    "bos_ts": c.get("ts", ""),
-                    "sl_since_bos": round(min(candles[j]["low"] for j in range(last_sl_idx, i+1)), 6),
-                    "sh_before_bos": round(sh_before_bos, 6),
-                    "sh_since_bos": round(sh_since_bos, 6),
-                }
-
-        if valid_sh:
-            last_sh_idx, last_sh_price, last_sh_ts = valid_sh[-1]
-            if c["close"] > last_sh_price:
-                # BOS bullish terkonfirmasi
-                post_sl = [candles[j]["low"] for j in range(last_sh_idx, i + 1)]
-                sl_since_bos = min(post_sl) if post_sl else c["low"]
-
-                pre_sl = [(idx, p) for idx, p, _ in valid_sl if idx < last_sh_idx]
-                sl_before_bos = pre_sl[-1][1] if pre_sl else c["low"]
-
-                last_bos = {
-                    "type": "bullish_bos",
-                    "direction": "bullish",
-                    "swing_level": round(last_sh_price, 6),
-                    "swing_idx": last_sh_idx,
-                    "swing_ts": last_sh_ts,
-                    "bos_candle_idx": i,
-                    "bos_close": round(c["close"], 6),
-                    "bos_ts": c.get("ts", ""),
-                    "sh_since_bos": round(max(candles[j]["high"] for j in range(last_sh_idx, i+1)), 6),
-                    "sl_before_bos": round(sl_before_bos, 6),
-                    "sl_since_bos": round(sl_since_bos, 6),
-                }
-
-    return last_bos
-
-
-def find_fvg(candles: list, bos_type: str = "", min_gap_pct: float = 0.05) -> list:
-    """
-    Replay kiri ke kanan — temukan FVG setelah BOS.
-    FVG bearish: candle[i].low > candle[i+2].high
-    FVG bullish: candle[i].high < candle[i+2].low
-    Hanya FVG yang sesuai arah BOS.
-    """
-    fvgs = []
-    direction = "bearish" if "bearish" in bos_type else "bullish" if "bullish" in bos_type else ""
-
-    for i in range(len(candles) - 2):
-        c1, c2, c3 = candles[i], candles[i+1], candles[i+2]
-
-        if direction in ("bearish", ""):
-            # FVG bearish: gap turun — low C1 > high C3
-            if c1["low"] > c3["high"]:
-                gap = c1["low"] - c3["high"]
-                mid = (c1["low"] + c3["high"]) / 2
-                if (gap / mid * 100) >= min_gap_pct:
-                    # Cek apakah sudah filled (candle setelahnya close menembus zona)
-                    filled = any(
-                        candles[j]["close"] > c1["low"]
-                        for j in range(i+3, len(candles))
-                    )
-                    fvgs.append({
-                        "type": "bearish",
-                        "high": round(c1["low"], 6),   # atas FVG = low C1
-                        "low":  round(c3["high"], 6),  # bawah FVG = high C3
-                        "mid":  round(mid, 6),
-                        "gap_pct": round(gap / mid * 100, 4),
-                        "candle_idx": i,
-                        "ts": c1.get("ts", ""),
-                        "filled": filled,
-                    })
-
-        if direction in ("bullish", ""):
-            # FVG bullish: gap naik — high C1 < low C3
-            if c1["high"] < c3["low"]:
-                gap = c3["low"] - c1["high"]
-                mid = (c3["low"] + c1["high"]) / 2
-                if (gap / mid * 100) >= min_gap_pct:
-                    filled = any(
-                        candles[j]["close"] < c1["high"]
-                        for j in range(i+3, len(candles))
-                    )
-                    fvgs.append({
-                        "type": "bullish",
-                        "high": round(c3["low"], 6),   # atas FVG = low C3
-                        "low":  round(c1["high"], 6),  # bawah FVG = high C1
-                        "mid":  round(mid, 6),
-                        "gap_pct": round(gap / mid * 100, 4),
-                        "candle_idx": i,
-                        "ts": c1.get("ts", ""),
-                        "filled": filled,
-                    })
-
-    return fvgs
-
-
-def find_idm_m5(candles: list, direction: str = "bearish",
-                gap_min: int = 1, max_search: int = 200) -> dict | None:
-    """
-    State machine IDM replay kiri ke kanan.
-
-    IDM bearish (untuk BOS bullish H1 — M5 retrace turun):
-      Candle A buat swing HIGH
-      Minimal gap_min candle tidak tembus high A (close maupun wick)
-      Candle berikutnya TEMBUS high A
-      Watch level = LOW candle A
-
-    IDM bullish (untuk BOS bearish H1 — M5 retrace naik):
-      Candle A buat swing LOW
-      Gap candle tidak tembus low A
-      Tembus → Watch level = HIGH candle A
-    """
-    n = min(len(candles), max_search)
-    idms = []
-
-    for i in range(1, n - gap_min - 1):
-        c_a = candles[i]
-
+    for i in range(1, n):
+        ca = candles[i]
         if direction == "bearish":
-            high_a = c_a["high"]
-            # Candle A harus lebih tinggi dari candle sebelumnya (swing high candidate)
-            if high_a <= candles[i-1]["high"]:
+            high_a = _h(ca)
+            if high_a <= _h(candles[i-1]):
                 continue
-
-            # Cari gap + tembus
-            gap_count = 0
-            tembus_idx = None
+            gap = 0
+            tembus = None
             for j in range(i+1, min(i+max_search, n)):
-                if candles[j]["high"] >= high_a or candles[j]["close"] >= high_a:
-                    if gap_count >= gap_min:
-                        tembus_idx = j
+                cj_h = _h(candles[j])
+                cj_c = _c(candles[j])
+                if cj_h >= high_a or cj_c >= high_a:
+                    if gap >= gap_min:
+                        tembus = j
                     break
-                gap_count += 1
-
-            if tembus_idx and gap_count >= gap_min:
-                idms.append({
-                    "type": "bearish_idm",
-                    "candle_a_idx": i,
-                    "candle_a_high": round(c_a["high"], 6),
-                    "candle_a_low":  round(c_a["low"],  6),
-                    "watch_level":   round(c_a["low"],  6),  # LOW candle A
-                    "tembus_idx":    tembus_idx,
-                    "gap_count":     gap_count,
-                    "ts":            c_a.get("ts", ""),
-                })
-
+                gap += 1
+            if tembus:
+                return {"type":"bearish_idm","candle_a_idx":i,
+                        "candle_a_high":round(high_a,8),
+                        "candle_a_low":round(_l(ca),8),
+                        "watch_level":round(_l(ca),8),
+                        "tembus_idx":tembus,"gap":gap,"ts":_ts(ca)}
         elif direction == "bullish":
-            low_a = c_a["low"]
-            if low_a >= candles[i-1]["low"]:
+            low_a = _l(ca)
+            if low_a >= _l(candles[i-1]):
                 continue
-
-            gap_count = 0
-            tembus_idx = None
+            gap = 0
+            tembus = None
             for j in range(i+1, min(i+max_search, n)):
-                if candles[j]["low"] <= low_a or candles[j]["close"] <= low_a:
-                    if gap_count >= gap_min:
-                        tembus_idx = j
+                cj_l = _l(candles[j])
+                cj_c = _c(candles[j])
+                if cj_l <= low_a or cj_c <= low_a:
+                    if gap >= gap_min:
+                        tembus = j
                     break
-                gap_count += 1
-
-            if tembus_idx and gap_count >= gap_min:
-                idms.append({
-                    "type": "bullish_idm",
-                    "candle_a_idx": i,
-                    "candle_a_high": round(c_a["high"], 6),
-                    "candle_a_low":  round(c_a["low"],  6),
-                    "watch_level":   round(c_a["high"], 6),  # HIGH candle A
-                    "tembus_idx":    tembus_idx,
-                    "gap_count":     gap_count,
-                    "ts":            c_a.get("ts", ""),
-                })
-
-    return idms[-1] if idms else None
+                gap += 1
+            if tembus:
+                return {"type":"bullish_idm","candle_a_idx":i,
+                        "candle_a_high":round(_h(ca),8),
+                        "candle_a_low":round(low_a,8),
+                        "watch_level":round(_h(ca),8),
+                        "tembus_idx":tembus,"gap":gap,"ts":_ts(ca)}
+    return None
 
 
-def build_h1_analysis(candles: list, logic: dict) -> dict:
+# ── Main replay engine ───────────────────────────────────
+
+class ReplayEngine:
     """
-    Replay H1 kiri ke kanan — hasilnya dikirim ke Hiura.
-    Hiura tidak perlu baca candle mentah — sudah pre-processed.
+    Replay candle H1 satu per satu kiri ke kanan.
+    Berhenti saat BOS atau FVG touch ditemukan.
+    State disimpan dan dilanjutkan di siklus berikutnya.
     """
-    bos_cfg = logic.get("find_bos_h1", {})
-    fvg_cfg = logic.get("find_fvg_h1", {})
 
-    sw_left  = bos_cfg.get("swing_left",  8)
-    sw_right = bos_cfg.get("swing_right", 8)
-    min_gap  = fvg_cfg.get("min_gap_pct", 0.05)
+    def __init__(self, sw_left=8, sw_right=8, min_gap_pct=0.05):
+        self.sw_left     = sw_left
+        self.sw_right    = sw_right
+        self.min_gap_pct = min_gap_pct
 
-    bos  = find_bos(candles, sw_left, sw_right)
-    fvgs = find_fvg(candles, bos.get("type", "") if bos else "", min_gap)
+        # State — disimpan antar siklus
+        self.state       = "SCAN_BOS"
+        self.swing_highs : list[tuple] = []   # (idx, price)
+        self.swing_lows  : list[tuple] = []   # (idx, price)
+        self.bos         : dict | None = None
+        self.fvgs        : list[dict]  = []   # FVG watchlist
+        self.last_h1_idx : int = 0            # idx terakhir yang sudah diproses
+        self.idm_m5      : dict | None = None
+        self.idm_watch   : float = 0.0
 
-    # Hanya FVG setelah BOS dan belum filled
-    if bos:
-        bos_idx = bos.get("bos_candle_idx", 0)
-        fvgs = [f for f in fvgs if f["candle_idx"] > bos_idx and not f["filled"]]
+    def _update_swings(self, candles: list, up_to: int):
+        """Update swing list sampai candle up_to (pastikan swing_right terpenuhi)."""
+        for i in range(self.last_h1_idx, up_to - self.sw_right):
+            if i < self.sw_left:
+                continue
+            if is_swing_high(candles, i, self.sw_left, self.sw_right):
+                self.swing_highs.append((i, _h(candles[i])))
+            if is_swing_low(candles, i, self.sw_left, self.sw_right):
+                self.swing_lows.append((i, _l(candles[i])))
 
-    return {
-        "bos":  bos,
-        "fvgs": fvgs[:3],  # max 3 FVG fresh
-        "swings": find_swings(candles, sw_left, sw_right),
-        "current_price": candles[-1]["close"] if candles else 0,
-    }
+    def replay_h1(self, candles: list) -> dict:
+        """
+        Replay semua candle H1, lanjut dari posisi terakhir.
+        Return: {"event": "bos"|"fvg_touched"|"none", "data": {...}}
+        """
+        n = len(candles)
+
+        # ── STATE: SCAN_BOS ──────────────────────────────
+        if self.state == "SCAN_BOS":
+            for i in range(self.last_h1_idx, n):
+                # Update swing saat candle ke-i sudah punya cukup candle kanan
+                self._update_swings(candles, i)
+
+                c = candles[i]
+                cl = _c(c)
+
+                # Cek BOS bearish: close di bawah swing low valid terakhir
+                if self.swing_lows:
+                    last_sl_idx, last_sl_price = self.swing_lows[-1]
+                    if last_sl_idx + self.sw_right < i and cl < last_sl_price:
+                        # BOS bearish terkonfirmasi!
+                        sh_before = max((p for _,p in self.swing_highs if _ < last_sl_idx), default=_h(c))
+                        sh_since  = max((_h(candles[j]) for j in range(last_sl_idx, i+1)), default=_h(c))
+                        self.bos = {
+                            "type": "bearish_bos", "direction": "bearish",
+                            "swing_level": round(last_sl_price, 8),
+                            "swing_idx": last_sl_idx,
+                            "bos_candle_idx": i,
+                            "bos_close": round(cl, 8),
+                            "bos_ts": _ts(c),
+                            "sh_before_bos": round(sh_before, 8),
+                            "sh_since_bos": round(sh_since, 8),
+                            "sl_since_bos": round(min(_l(candles[j]) for j in range(last_sl_idx,i+1)), 8),
+                        }
+                        # Cari FVG bearish setelah BOS
+                        self.fvgs = []
+                        for fi in range(last_sl_idx, i+1):
+                            fvg = find_fvg_at(candles, fi, "bearish", self.min_gap_pct)
+                            if fvg:
+                                self.fvgs.append(fvg)
+                        self.fvgs = self.fvgs[:3]  # max 3
+                        self.last_h1_idx = i + 1
+                        self.state = "WAIT_FVG"
+                        logger.info(f"[REPLAY] BOS bearish @ {last_sl_price} | FVG: {len(self.fvgs)}")
+                        return {"event": "bos", "data": {"bos": self.bos, "fvgs": self.fvgs}}
+
+                # Cek BOS bullish
+                if self.swing_highs:
+                    last_sh_idx, last_sh_price = self.swing_highs[-1]
+                    if last_sh_idx + self.sw_right < i and cl > last_sh_price:
+                        sl_before = min((p for _,p in self.swing_lows if _ < last_sh_idx), default=_l(c))
+                        sl_since  = min((_l(candles[j]) for j in range(last_sh_idx, i+1)), default=_l(c))
+                        self.bos = {
+                            "type": "bullish_bos", "direction": "bullish",
+                            "swing_level": round(last_sh_price, 8),
+                            "swing_idx": last_sh_idx,
+                            "bos_candle_idx": i,
+                            "bos_close": round(cl, 8),
+                            "bos_ts": _ts(c),
+                            "sl_before_bos": round(sl_before, 8),
+                            "sl_since_bos": round(sl_since, 8),
+                            "sh_since_bos": round(max(_h(candles[j]) for j in range(last_sh_idx,i+1)), 8),
+                        }
+                        self.fvgs = []
+                        for fi in range(last_sh_idx, i+1):
+                            fvg = find_fvg_at(candles, fi, "bullish", self.min_gap_pct)
+                            if fvg:
+                                self.fvgs.append(fvg)
+                        self.fvgs = self.fvgs[:3]
+                        self.last_h1_idx = i + 1
+                        self.state = "WAIT_FVG"
+                        logger.info(f"[REPLAY] BOS bullish @ {last_sh_price} | FVG: {len(self.fvgs)}")
+                        return {"event": "bos", "data": {"bos": self.bos, "fvgs": self.fvgs}}
+
+            self.last_h1_idx = max(0, n - self.sw_right - 1)
+            return {"event": "none", "data": {}}
+
+        # ── STATE: WAIT_FVG ──────────────────────────────
+        elif self.state == "WAIT_FVG":
+            bos_dir = self.bos.get("direction","")
+            sw_ref  = self.bos.get("swing_level", 0)
+
+            for i in range(self.last_h1_idx, n):
+                c = candles[i]
+
+                # Cek CHOCH: harga melewati swing referensi (invalidasi BOS)
+                if bos_dir == "bearish" and _c(c) > self.bos.get("sh_before_bos", 999999):
+                    self.reset()
+                    logger.info(f"[REPLAY] CHOCH — BOS invalid. Reset.")
+                    return {"event": "choch", "data": {"reason": "close above sh_before_bos"}}
+
+                if bos_dir == "bullish" and _c(c) < self.bos.get("sl_before_bos", 0):
+                    self.reset()
+                    return {"event": "choch", "data": {"reason": "close below sl_before_bos"}}
+
+                # Cek FVG filled (kalau ada candle yang close menembus FVG, hapus FVG itu)
+                self.fvgs = [f for f in self.fvgs if not check_fvg_filled(f, c)]
+
+                if not self.fvgs:
+                    # Semua FVG sudah filled — reset
+                    logger.info("[REPLAY] Semua FVG filled → reset SCAN_BOS")
+                    self.reset()
+                    return {"event": "all_fvg_filled", "data": {}}
+
+                # Cek apakah ada FVG yang disentuh (wick touch)
+                for fvg in self.fvgs:
+                    if check_fvg_touched(fvg, c):
+                        touched_fvg = fvg
+                        self.last_h1_idx = i + 1
+                        self.state = "IDM_HUNT"
+                        logger.info(f"[REPLAY] FVG {fvg['type']} disentuh @ {fvg['low']}–{fvg['high']}")
+                        return {"event": "fvg_touched", "data": {
+                            "fvg": touched_fvg, "bos": self.bos,
+                            "remaining_fvgs": self.fvgs,
+                            "candle_touch": {"h": _h(c), "l": _l(c), "c": _c(c), "ts": _ts(c)},
+                        }}
+
+            self.last_h1_idx = n
+            return {"event": "none", "data": {"waiting": "fvg_touch",
+                                               "fvgs": len(self.fvgs),
+                                               "bos": self.bos}}
+
+        return {"event": "none", "data": {}}
+
+    def replay_m5(self, m5_candles: list, direction: str,
+                  logic: dict, sh: float, sl: float) -> dict:
+        """
+        Replay M5 kiri ke kanan cari IDM dalam range SH-SL.
+        Return: {"event": "idm_found"|"none", "data": {...}}
+        """
+        idm_cfg  = logic.get("find_idm_m5", {})
+        dir_cfg  = idm_cfg.get(direction, {})
+        gap_min  = dir_cfg.get("gap_min_candles", 1)
+        max_srch = idm_cfg.get("max_search_candles", 200)
+
+        # Filter candle dalam range SH-SL
+        in_range = [c for c in m5_candles if sl * 0.995 <= _l(c) and _h(c) <= sh * 1.005]
+        use = in_range if len(in_range) >= 5 else m5_candles
+
+        idm = find_idm_replay(use, direction, gap_min, max_srch)
+        if idm:
+            # Validasi level dalam range
+            if sl <= idm["watch_level"] <= sh:
+                self.idm_m5    = idm
+                self.idm_watch = idm["watch_level"]
+                self.state     = "BOS_GUARD"
+                logger.info(f"[REPLAY M5] IDM {direction} @ watch={idm['watch_level']}")
+                return {"event": "idm_found", "data": idm}
+
+        return {"event": "none", "data": {"searching": direction, "range": f"{sl}–{sh}"}}
+
+    def check_idm_touched(self, candle: dict) -> bool:
+        """Cek apakah candle baru menyentuh level IDM."""
+        if not self.idm_watch:
+            return False
+        idm = self.idm_m5
+        if not idm:
+            return False
+        if idm["type"] == "bearish_idm":
+            return _l(candle) <= self.idm_watch or _c(candle) <= self.idm_watch
+        else:
+            return _h(candle) >= self.idm_watch or _c(candle) >= self.idm_watch
+
+    def reset(self):
+        """Reset ke SCAN_BOS dari posisi saat ini (tidak dari awal)."""
+        self.state       = "SCAN_BOS"
+        self.bos         = None
+        self.fvgs        = []
+        self.idm_m5      = None
+        self.idm_watch   = 0.0
+        # Simpan swing_highs/lows dan last_h1_idx — tidak perlu replay ulang dari awal
+
+    def to_dict(self) -> dict:
+        return {
+            "state": self.state, "bos": self.bos,
+            "fvgs": self.fvgs, "fvgs_count": len(self.fvgs),
+            "idm_m5": self.idm_m5, "idm_watch": self.idm_watch,
+            "last_h1_idx": self.last_h1_idx,
+            "swing_highs_count": len(self.swing_highs),
+            "swing_lows_count": len(self.swing_lows),
+        }
 
 
-def build_m5_analysis(candles: list, logic: dict,
-                      idm_direction: str, sh: float, sl: float) -> dict:
-    """
-    Replay M5 kiri ke kanan — hasilnya dikirim ke Senanan.
-    Cari IDM dalam range SH-SL.
-    """
-    idm_cfg = logic.get("find_idm_m5", {})
-    dir_cfg  = idm_cfg.get(idm_direction, {})
-    gap_min  = dir_cfg.get("gap_min_candles", 1)
-    max_s    = idm_cfg.get("max_search_candles", 200)
+# ── Helper untuk format hasil replay ke teks AI ─────────
 
-    # Filter candle dalam range harga
-    in_range = [c for c in candles if sl <= c["low"] and c["high"] <= sh * 1.005]
-    use = in_range if len(in_range) >= 5 else candles
-
-    idm = find_idm_m5(use, idm_direction, gap_min, max_s)
-
-    return {
-        "idm":           idm,
-        "idm_direction": idm_direction,
-        "range_sh":      sh,
-        "range_sl":      sl,
-    }
-
-
-def format_replay_for_ai(h1_result: dict = None, m5_result: dict = None) -> str:
+def format_replay_for_ai(replay_event: dict, engine: "ReplayEngine") -> str:
     """Format hasil replay jadi teks ringkas untuk AI."""
+    event = replay_event.get("event", "none")
+    data  = replay_event.get("data", {})
     lines = []
 
-    if h1_result:
-        bos = h1_result.get("bos")
-        if bos:
-            lines.append(f"=== BOS H1 TERDETEKSI ===")
-            lines.append(f"Type: {bos['type']}")
-            lines.append(f"Swing level (BOS di sini): {bos['swing_level']}")
-            lines.append(f"Terbentuk di candle idx={bos['swing_idx']} ({bos['swing_ts']})")
-            lines.append(f"Dikonfirmasi di candle idx={bos['bos_candle_idx']} ({bos['bos_ts']}), close={bos['bos_close']}")
-            if bos["type"] == "bullish_bos":
-                lines.append(f"SH sejak BOS: {bos.get('sh_since_bos',0)}")
-                lines.append(f"SL sebelum BOS: {bos.get('sl_before_bos',0)}")
-            else:
-                lines.append(f"SL sejak BOS: {bos.get('sl_since_bos',0)}")
-                lines.append(f"SH sebelum BOS: {bos.get('sh_before_bos',0)}")
-        else:
-            lines.append("=== TIDAK ADA BOS H1 ===")
+    if event == "bos":
+        bos = data.get("bos", {})
+        fvgs = data.get("fvgs", [])
+        lines.append(f"=== BOS {bos.get('type','').upper()} TERBENTUK ===")
+        lines.append(f"Swing level: {bos.get('swing_level')} (idx={bos.get('swing_idx')})")
+        lines.append(f"Dikonfirmasi: idx={bos.get('bos_candle_idx')}, close={bos.get('bos_close')}")
+        lines.append(f"SH sebelum BOS: {bos.get('sh_before_bos') or bos.get('sh_since_bos')}")
+        lines.append(f"SL referensi: {bos.get('sl_before_bos') or bos.get('sl_since_bos')}")
+        lines.append(f"\nFVG WATCHLIST ({len(fvgs)}):")
+        for f in fvgs:
+            lines.append(f"  {f['type'].upper()} FVG: {f['low']}–{f['high']} gap={f['gap_pct']:.3f}%")
 
-        fvgs = h1_result.get("fvgs", [])
-        if fvgs:
-            lines.append(f"\n=== FVG H1 FRESH ({len(fvgs)}) ===")
+    elif event == "fvg_touched":
+        fvg  = data.get("fvg", {})
+        bos  = data.get("bos", {})
+        ct   = data.get("candle_touch", {})
+        lines.append(f"=== FVG {fvg.get('type','').upper()} DISENTUH ===")
+        lines.append(f"FVG zone: {fvg['low']}–{fvg['high']}")
+        lines.append(f"Candle touch: H={ct.get('h')} L={ct.get('l')} C={ct.get('c')}")
+        lines.append(f"BOS aktif: {bos.get('type')} @ {bos.get('swing_level')}")
+        lines.append(f"SH={bos.get('sh_before_bos') or bos.get('sh_since_bos')} "
+                     f"SL={bos.get('sl_before_bos') or bos.get('sl_since_bos')}")
+        lines.append(f"→ Sekarang: cari IDM M5 dalam range SH-SL")
+
+    elif event == "idm_found":
+        idm = data
+        lines.append(f"=== IDM {idm.get('type','').upper()} DITEMUKAN ===")
+        lines.append(f"Candle A: idx={idm.get('candle_a_idx')} H={idm.get('candle_a_high')} L={idm.get('candle_a_low')}")
+        lines.append(f"Watch level: {idm.get('watch_level')} (harga harus sentuh ini)")
+        lines.append(f"Gap: {idm.get('gap')} candle")
+
+    elif event == "none":
+        state = engine.state if engine else "unknown"
+        if state == "SCAN_BOS":
+            lines.append("Status: scanning BOS H1...")
+        elif state == "WAIT_FVG":
+            fvgs = engine.fvgs if engine else []
+            lines.append(f"Status: menunggu FVG touch | {len(fvgs)} FVG aktif")
             for f in fvgs:
-                lines.append(f"  {f['type'].upper()} FVG: high={f['high']} low={f['low']} mid={f['mid']} gap={f['gap_pct']:.3f}%")
-        else:
-            lines.append("\n=== TIDAK ADA FVG H1 FRESH ===")
+                lines.append(f"  {f['type']} {f['low']}–{f['high']}")
 
-    if m5_result:
-        idm = m5_result.get("idm")
-        lines.append(f"\n=== IDM M5 ({m5_result['idm_direction'].upper()}) ===")
-        if idm:
-            lines.append(f"Type: {idm['type']}")
-            lines.append(f"Candle A idx={idm['candle_a_idx']} ({idm['ts']})")
-            lines.append(f"  High candle A: {idm['candle_a_high']}")
-            lines.append(f"  Low candle A:  {idm['candle_a_low']}")
-            lines.append(f"Watch level (harus disentuh): {idm['watch_level']}")
-            lines.append(f"Gap count: {idm['gap_count']}")
-        else:
-            lines.append(f"IDM {m5_result['idm_direction']} tidak ditemukan dalam range {m5_result['range_sl']}–{m5_result['range_sh']}")
-
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "Status: monitoring..."

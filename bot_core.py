@@ -33,6 +33,7 @@ from watchlist_engine import WatchlistEngine
 from rules_engine import RulesEngine
 from logic_engine import LogicEngine
 from prompt_engine import PromptEngine
+from candle_replay import ReplayEngine, format_replay_for_ai
 from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
@@ -99,6 +100,7 @@ class BotCore:
         self.scan_interval = scan_sec
         self.symbol = symbol
         self.paper  = paper
+        self._replay = ReplayEngine(sw_left=8, sw_right=8, min_gap_pct=0.05)
         self._katyusha_key      = os.environ.get("OPENROUTER_API_KEY", "")
         self._last_katyusha_ts  = __import__("time").time()  # mulai dari sekarang, bukan epoch
         self._katyusha_interval = 5 * 3600  # 5 jam dalam detik
@@ -285,21 +287,62 @@ class BotCore:
         """Hiura analisis H1 setiap siklus. Buat sesi baru hanya saat BOS baru."""
         self.rules.reload()
         self.logic.reload()
+        # Sync replay engine params dari logic_rules.json
+        _bc = self.logic.rules.get("find_bos_h1", {})
+        self._replay.sw_left     = _bc.get("swing_left",  8)
+        self._replay.sw_right    = _bc.get("swing_right", 8)
+        _fc = self.logic.rules.get("find_fvg_h1", {})
+        self._replay.min_gap_pct = _fc.get("min_gap_pct", 0.05)
 
-        result = hiura_h1_analysis(
-            self.clients[0], self.model_ai1,
-            raw_data, self._full_ctx(),
-            prompt_ctx=self.prompts.build_context('hiura')
-        )
-        self._hiura_data = result
+        # Feed candle H1 ke ReplayEngine — replay kiri ke kanan
+        h1_candles = raw_data.get("h1", [])
+        replay_event = self._replay.replay_h1(h1_candles)
+        event = replay_event.get("event", "none")
 
-        bos_level = result.get("bos_level", 0)
-        bos_found = result.get("bos_found", False)
-        msg       = result.get("chat_msg", "")
+        # Format untuk Hiura
+        replay_text = format_replay_for_ai(replay_event, self._replay)
 
-        # Hiura SELALU ke live feed — bahkan kalau parse gagal
+        # Hiura hanya dipanggil Groq saat ada BOS baru (hemat token)
+        # Status biasa → live feed langsung
+        if event == "bos":
+            result = hiura_h1_analysis(
+                self.clients[0], self.model_ai1,
+                raw_data, self._full_ctx(),
+                prompt_ctx=self.prompts.build_context('hiura')
+            )
+            self._hiura_data = result
+            # Override dengan data dari replay (lebih akurat)
+            bos_data = replay_event["data"].get("bos", {})
+            self._hiura_data["bos_found"]     = True
+            self._hiura_data["bos_type"]      = bos_data.get("type","")
+            self._hiura_data["bos_level"]     = bos_data.get("swing_level", 0)
+            self._hiura_data["bias"]          = bos_data.get("direction","")
+            self._hiura_data["sh_since_bos"]  = bos_data.get("sh_before_bos") or bos_data.get("sh_since_bos",0)
+            self._hiura_data["sl_before_bos"] = bos_data.get("sl_before_bos") or bos_data.get("sl_since_bos",0)
+            self._hiura_data["fvg_list"]      = replay_event["data"].get("fvgs", [])
+            msg = result.get("chat_msg","") or f"Hiura: {replay_text.split(chr(10))[0]}"
+        elif event == "choch":
+            msg = f"Hiura: CHOCH — {replay_event['data'].get('reason','')}. Reset scan."
+            self._hiura_data = {"bos_found": False}
+        elif event == "all_fvg_filled":
+            msg = "Hiura: semua FVG sudah filled — reset, cari BOS baru."
+            self._hiura_data = {"bos_found": False}
+        else:
+            # Status biasa — tidak panggil Groq
+            state = self._replay.state
+            if state == "SCAN_BOS":
+                msg = f"Hiura: scan BOS H1... {raw_data.get('price',0):.4f}"
+            elif state == "WAIT_FVG":
+                fvg_cnt = len(self._replay.fvgs)
+                msg = f"Hiura: BOS aktif, tunggu FVG touch | {fvg_cnt} FVG | {raw_data.get('price',0):.4f}"
+            else:
+                msg = f"Hiura: {state} | {raw_data.get('price',0):.4f}"
+
+        bos_found = event == "bos"
+        bos_level = self._hiura_data.get("bos_level", 0)
+
         if not msg:
-            msg = f"Hiura: memantau {self.symbol} @ {raw_data.get('price',0):.2f}..."
+            msg = f"Hiura: memantau {self.symbol} @ {raw_data.get('price',0):.4f}"
         api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
 
         if bos_found and bos_level != self._last_bos_lvl:
@@ -374,8 +417,13 @@ class BotCore:
         """
         price = raw_data.get("price", 0)
 
+        # Replay engine sudah handle FVG touch/filled/CHOCH di replay_h1()
+        # Di sini kita tinggal cek event dari replay yang baru saja dijalankan
+        # Kalau tidak ada trigger dari watchlist (level harga), cek replay state
         if not triggered_items:
-            logger.info(f"[FVG WAIT] {price:.4f} | watchlist: {self.watchlist.summary()}")
+            state = self._replay.state
+            fvg_cnt = len(self._replay.fvgs)
+            logger.info(f"[FVG WAIT] {price:.4f} | replay_state={state} | FVG={fvg_cnt}")
             return
 
         # Dispatch berdasarkan phase dari item yang trigger
