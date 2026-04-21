@@ -304,74 +304,119 @@ class BotCore:
 
         if bos_found and bos_level != self._last_bos_lvl:
             self._last_bos_lvl = bos_level
-            wl = result.get("watchlist", [])
-            if wl:
-                # Buat sesi baru saat BOS — supaya chat Hiura langsung muncul
-                self._new_session(raw_data)
-                if msg:
-                    self._push("ai1", "Hiura", msg, 1)
-                self.watchlist.clear_untriggered()
-                for item in wl:
-                    self.watchlist.add(
-                        level=item["level"],
-                        condition=item.get("condition", "touch"),
-                        reason=item.get("reason", ""),
-                        phase="fvg_wait",
-                        session_ref=self._session_id,
-                    )
-                self._phase = "fvg_wait"
-                logger.info(f"[HIURA] BOS {result.get('bos_type')} @ {bos_level:.2f} | "
-                           f"{len(wl)} watchlist | Fase → fvg_wait")
-            else:
-                logger.info(f"[HIURA] BOS {bos_level:.2f} tapi tidak ada FVG fresh")
+            bos_type = result.get("bos_type", "")
+            sh       = result.get("sh_since_bos", 0) or result.get("bos_level", 0)
+            sl       = result.get("sl_before_bos", 0)
+            fvgs     = result.get("fvg_list", [])
+
+            # Buat sesi baru + push Hiura
+            self._new_session(raw_data)
+            if msg:
+                self._push("ai1", "Hiura", msg, 1)
+
+            self.watchlist.clear_untriggered()
+
+            # ── Watchlist 1: FVG touch → panggil AI-2 (IDM hunt) ──
+            for fvg in [f for f in fvgs if not f.get("filled")][:3]:
+                lvl   = fvg.get("mid") or (fvg["high"] + fvg["low"]) / 2
+                self.watchlist.add(
+                    level=lvl,
+                    condition="touch",
+                    reason=f"FVG {fvg['type']} {fvg['low']:.4f}–{fvg['high']:.4f} — sentuh = mulai IDM hunt",
+                    phase="fvg_wait",
+                    session_ref=self._session_id,
+                    symbol=self.symbol,
+                )
+
+            # ── Watchlist 2: BOS invalidation → Hiura scan ulang (tanpa AI) ──
+            if sl > 0:
+                inv_cond = "break_below" if "bullish" in bos_type else "break_above"
+                self.watchlist.add(
+                    level=sl,
+                    condition=inv_cond,
+                    reason=f"BOS invalidation: {inv_cond} {sl:.4f} = CHOCH, scan ulang",
+                    phase="bos_invalid",
+                    session_ref=self._session_id,
+                    symbol=self.symbol,
+                )
+
+            # ── Watchlist 3: Breakout jauh (beyond SH/SL) → Hiura scan BOS baru ──
+            if sh > 0:
+                ext_cond = "break_above" if "bullish" in bos_type else "break_below"
+                self.watchlist.add(
+                    level=sh,
+                    condition=ext_cond,
+                    reason=f"Breakout beyond SH/SL {sh:.4f} = BOS baru mungkin terbentuk",
+                    phase="bos_breakout",
+                    session_ref=self._session_id,
+                    symbol=self.symbol,
+                )
+
+            self._phase = "fvg_wait"
+            logger.info(f"[HIURA] BOS {bos_type} @ {bos_level:.4f} | "
+                       f"FVG={len([f for f in fvgs if not f.get('filled')])} | "
+                       f"Watchlist={len(self.watchlist.get_active())} level | Fase → fvg_wait")
+
         elif bos_found:
-            # BOS sama — update sesi yang ada
             if msg and self._session_id:
                 self._push("ai1", "Hiura", msg, 1)
-            logger.info(f"[HIURA] BOS sama @ {bos_level:.2f}")
+            logger.info(f"[HIURA] BOS sama @ {bos_level:.4f}")
         else:
             logger.info(f"[HIURA] Belum ada BOS | harga {raw_data.get('price')}")
 
     def _run_fvg_wait(self, raw_data: dict, triggered_items: list):
         """
-        Python deteksi FVG disentuh berdasarkan harga vs watchlist.
-        Saat trigger → Senanan mulai cari IDM M5.
-        Juga pantau CHOCH H1.
+        Tunggu trigger dari salah satu 3 watchlist:
+          1. fvg_wait     → FVG disentuh → panggil AI-2
+          2. bos_invalid  → BOS invalid (CHOCH) → reset tanpa AI
+          3. bos_breakout → Breakout jauh → reset, Hiura scan ulang
+        Python cek kondisi tambahan tanpa AI setiap siklus.
         """
         price = raw_data.get("price", 0)
 
-        # Cek CHOCH: harga close H1 melewati SL/SH referensi
-        h1 = raw_data.get("h1", [])
-        if h1:
-            last = h1[-1]
-            bos_type = self._hiura_data.get("bos_type", "")
-            sl_ref = self._hiura_data.get("sl_before_bos", 0)
-            sh_ref = self._hiura_data.get("sh_since_bos", 0)
+        if not triggered_items:
+            logger.info(f"[FVG WAIT] {price:.4f} | watchlist: {self.watchlist.summary()}")
+            return
 
-            choch = False
-            if bos_type == "bullish_bos" and sl_ref > 0 and last["c"] < sl_ref:
-                choch = True
-                msg = f"Hiura: CHOCH bearish — close {last['c']:.2f} di bawah SL ref {sl_ref:.2f}. Reset."
-            elif bos_type == "bearish_bos" and sh_ref > 0 and last["c"] > sh_ref:
-                choch = True
-                msg = f"Hiura: CHOCH bullish — close {last['c']:.2f} di atas SH ref {sh_ref:.2f}. Reset."
+        # Dispatch berdasarkan phase dari item yang trigger
+        for item in triggered_items:
+            phase_item = item.get("phase", "fvg_wait")
+            lvl        = item.get("level", 0)
 
-            if choch:
-                self._push("ai1", "Hiura", msg, 1)
-                self._reset("choch")
+            # ── CHOCH / BOS Invalidation (tanpa AI) ──
+            if phase_item == "bos_invalid":
+                bos_type = self._hiura_data.get("bos_type", "")
+                direction = "bearish" if "bullish" in bos_type else "bullish"
+                msg = (f"Hiura: BOS invalid — harga {price:.4f} melewati level {lvl:.4f}. "
+                       f"CHOCH {direction}. Reset, cari BOS baru.")
+                api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
+                if self._session_id:
+                    self._push("ai1", "Hiura", msg, 1)
+                logger.info(f"[FVG WAIT] BOS invalid @ {lvl:.4f} → reset")
+                self._reset("bos_invalid")
                 self._last_bos_lvl = 0.0
                 return
 
-        if not triggered_items:
-            logger.info(f"[FVG WAIT] Harga {price:.2f} — tunggu FVG touch")
+            # ── Breakout jauh — mungkin ada BOS baru (tanpa AI dulu) ──
+            elif phase_item == "bos_breakout":
+                msg = (f"Hiura: breakout melewati {lvl:.4f}. "
+                       f"BOS lama sudah jauh terlewat — scan ulang struktur H1.")
+                api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
+                if self._session_id:
+                    self._push("ai1", "Hiura", msg, 1)
+                logger.info(f"[FVG WAIT] Breakout @ {lvl:.4f} → reset ke h1_scan")
+                self._reset("bos_breakout")
+                self._last_bos_lvl = 0.0
+                return
+
+        # ── FVG disentuh → panggil Senanan (AI-2) ──
+        fvg_items = [t for t in triggered_items if t.get("phase", "fvg_wait") == "fvg_wait"]
+        if not fvg_items:
             return
 
-        # Ada watchlist yang disentuh → FVG kena → panggil Senanan
-        item = triggered_items[-1]
-        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.2f} — panggil Senanan")
+        item = fvg_items[-1]
+        logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.4f} — panggil Senanan")
 
-        # Sesi sudah dibuat saat BOS — tidak perlu buat baru
-        # Kalau belum ada sesi (edge case), buat sekarang
         if not self._session_id:
             self._new_session(raw_data)
             hiura_msg = self._hiura_data.get("chat_msg", "")
@@ -896,7 +941,11 @@ KEMAMPUANMU:
                     self._run_fvg_wait(raw, triggered)
 
                 elif self._phase == "bos_guard":
-                    self._run_bos_guard(raw, triggered)
+                    if triggered:
+                        self._run_bos_guard(raw, triggered)
+                    else:
+                        active = self.watchlist.get_active()
+                        logger.info(f"[BOS GUARD] {price:.4f} | tunggu IDM touch | watchlist: {len(active)} level")
 
                 elif self._phase == "entry_sniper":
                     self._run_entry_sniper(raw)
