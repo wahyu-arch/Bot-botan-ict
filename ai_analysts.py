@@ -239,6 +239,18 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
     m5_table = _candle_table(raw_data["m5"], limit=100)
     price = raw_data["price"]
 
+    # Jalankan replay M5 Python dulu — hasilnya dikirim ke AI sebagai konteks
+    try:
+        from candle_replay import ReplayEngine, format_replay_for_ai
+        _tmp_engine = ReplayEngine()
+        m5_replay_event = _tmp_engine.replay_m5(
+            raw_data["m5"], m5_idm_direction, logic, sh, sl
+        )
+        replay_m5_text = format_replay_for_ai(m5_replay_event, _tmp_engine)
+    except Exception as _e:
+        logger.warning(f"[SENANAN] replay_m5 error: {_e}")
+        replay_m5_text = f"(Replay M5 tidak tersedia: {_e})"
+
     prompt = f"""Kamu adalah Senanan, spesialis IDM (Inducement) di M5 ICT.
 Harga sekarang: {price}
 Bias H1: {bias_h1}
