@@ -3,6 +3,11 @@ import asyncio
 import sys
 import os
 import threading
+
+# Inisialisasi file JSON dari data_defaults/ → data/ (Railway Volume)
+# File yang sudah ada di volume TIDAK di-overwrite (AI updates dipertahankan)
+from startup_init import init_data_files
+init_data_files()
 import logging
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
