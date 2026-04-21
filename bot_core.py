@@ -497,8 +497,22 @@ class BotCore:
                     phase="bos_guard",
                     session_ref=self._session_id,
                 )
-            self._phase = "bos_guard"
-            logger.info(f"[SENANAN] IDM ditemukan @ {result.get('watch_level',0):.2f} | Fase → bos_guard")
+            # Cek apakah MSS wajib (dari logic_rules.json)
+            import json as _j
+            try:
+                with open("data/logic_rules.json") as _f:
+                    _lc = _j.load(_f)
+                _mss_req = _lc.get("entry", {}).get("mss_required", True)
+            except Exception:
+                _mss_req = True
+
+            if _mss_req:
+                self._phase = "bos_guard"
+                logger.info(f"[SENANAN] IDM @ {result.get('watch_level',0):.4f} | Fase → bos_guard (tunggu MSS)")
+            else:
+                # MSS tidak wajib — saat IDM disentuh langsung ke entry_sniper
+                self._phase = "bos_guard"  # tetap bos_guard untuk tunggu IDM disentuh
+                logger.info(f"[SENANAN] IDM @ {result.get('watch_level',0):.4f} | Fase → bos_guard (IDM touch = entry)")
         else:
             logger.info("[SENANAN] IDM belum ditemukan — tetap di fvg_wait")
 
@@ -528,9 +542,19 @@ class BotCore:
 
         decision = result.get("decision", "wait")
 
-        if decision == "entry":
+        # Cek mss_required dari logic_rules
+        import json as _jj
+        try:
+            with open("data/logic_rules.json") as _ff:
+                _lcc = _jj.load(_ff)
+            _mss_req2 = _lcc.get("entry", {}).get("mss_required", True)
+        except Exception:
+            _mss_req2 = True
+
+        if decision == "entry" or (not _mss_req2 and triggered_items):
+            # IDM disentuh dan MSS tidak wajib → langsung entry
             self._phase = "entry_sniper"
-            logger.info("[SHINA] MSS terkonfirmasi → entry sniper")
+            logger.info(f"[SHINA] {'MSS terkonfirmasi' if decision=='entry' else 'IDM touched, MSS tidak wajib'} → entry sniper")
 
         elif decision == "reset_idm":
             # MSS batal, cari IDM baru
