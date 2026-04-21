@@ -93,13 +93,16 @@ def check_fvg_filled(fvg: dict, candle: dict) -> bool:
 
 def check_fvg_touched(fvg: dict, candle: dict) -> bool:
     """
-    FVG touched = wick atau body masuk ke zona.
-    Untuk BOS bearish: harga naik retrace, wick atas masuk FVG bearish.
+    FVG touched = wick ATAU body masuk ke zona FVG.
+    Kalau harga sudah di dalam zona (antara low dan high), langsung touched.
+    Kalau harga menyentuh batas zona dari luar, juga touched.
     """
-    if fvg["type"] == "bearish":
-        return _h(candle) >= fvg["low"]   # wick atas masuk ke bawah FVG
-    else:
-        return _l(candle) <= fvg["high"]  # wick bawah masuk ke atas FVG
+    h, l = _h(candle), _l(candle)
+    fvg_low, fvg_high = fvg["low"], fvg["high"]
+
+    # Harga di dalam zona (body atau wick overlap dengan FVG)
+    # Overlap = h >= fvg_low AND l <= fvg_high
+    return h >= fvg_low and l <= fvg_high
 
 
 # ── IDM detection (state machine) ───────────────────────
@@ -271,6 +274,21 @@ class ReplayEngine:
         elif self.state == "WAIT_FVG":
             bos_dir = self.bos.get("direction","")
             sw_ref  = self.bos.get("swing_level", 0)
+
+            # Cek langsung: kalau harga sekarang sudah di dalam FVG, trigger immediately
+            current = candles[-1] if candles else None
+            if current:
+                for fvg in self.fvgs:
+                    if check_fvg_touched(fvg, current) and not check_fvg_filled(fvg, current):
+                        self.state = "IDM_HUNT"
+                        self.last_h1_idx = n
+                        logger.info(f"[REPLAY] Harga sudah di dalam FVG {fvg['low']}–{fvg['high']} — immediate trigger")
+                        return {"event": "fvg_touched", "data": {
+                            "fvg": fvg, "bos": self.bos,
+                            "remaining_fvgs": self.fvgs,
+                            "candle_touch": {"h": _h(current), "l": _l(current), "c": _c(current), "ts": _ts(current)},
+                            "immediate": True,
+                        }}
 
             for i in range(self.last_h1_idx, n):
                 c = candles[i]
