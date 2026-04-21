@@ -298,7 +298,7 @@ class BotCore:
 
         # Feed candle H1 ke ReplayEngine — replay kiri ke kanan
         h1_candles = raw_data.get("h1", [])
-        replay_event = self._replay.replay_h1(h1_candles)
+        replay_event = self._replay.replay_h1(h1_candles, current_price=raw_data.get('price', 0))
         event = replay_event.get("event", "none")
 
         # Format untuk Hiura

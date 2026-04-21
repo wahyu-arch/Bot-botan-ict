@@ -193,7 +193,7 @@ class ReplayEngine:
             if is_swing_low(candles, i, self.sw_left, self.sw_right):
                 self.swing_lows.append((i, _l(candles[i])))
 
-    def replay_h1(self, candles: list) -> dict:
+    def replay_h1(self, candles: list, current_price: float = 0) -> dict:
         """
         Replay semua candle H1, lanjut dari posisi terakhir.
         Return: {"event": "bos"|"fvg_touched"|"none", "data": {...}}
@@ -275,18 +275,24 @@ class ReplayEngine:
             bos_dir = self.bos.get("direction","")
             sw_ref  = self.bos.get("swing_level", 0)
 
-            # Cek langsung: kalau harga sekarang sudah di dalam FVG, trigger immediately
-            current = candles[-1] if candles else None
-            if current:
+            # Cek langsung: kalau harga saat ini sudah di dalam FVG, trigger immediately
+            # Gunakan current_price (harga live bid) bukan candle terakhir yang sudah close
+            if current_price > 0:
+                price_candle = {"h": current_price, "l": current_price, "c": current_price, "o": current_price}
+            else:
+                price_candle = candles[-1] if candles else None
+
+            if price_candle:
                 for fvg in self.fvgs:
-                    if check_fvg_touched(fvg, current) and not check_fvg_filled(fvg, current):
+                    if check_fvg_touched(fvg, price_candle) and not check_fvg_filled(fvg, price_candle):
                         self.state = "IDM_HUNT"
                         self.last_h1_idx = n
-                        logger.info(f"[REPLAY] Harga sudah di dalam FVG {fvg['low']}–{fvg['high']} — immediate trigger")
+                        p = current_price or _c(price_candle)
+                        logger.info(f"[REPLAY] Harga {p} di dalam FVG {fvg['low']}–{fvg['high']} — immediate trigger")
                         return {"event": "fvg_touched", "data": {
                             "fvg": fvg, "bos": self.bos,
                             "remaining_fvgs": self.fvgs,
-                            "candle_touch": {"h": _h(current), "l": _l(current), "c": _c(current), "ts": _ts(current)},
+                            "candle_touch": {"h": p, "l": p, "c": p, "ts": "live"},
                             "immediate": True,
                         }}
 
