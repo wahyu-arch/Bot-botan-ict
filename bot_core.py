@@ -103,7 +103,7 @@ class BotCore:
         self._replay = ReplayEngine(sw_left=8, sw_right=8, min_gap_pct=0.05)
         self._katyusha_key      = os.environ.get("OPENROUTER_API_KEY", "")
         self._last_katyusha_ts  = __import__("time").time()  # mulai dari sekarang, bukan epoch
-        self._katyusha_interval = 5 * 3600  # 5 jam dalam detik
+        self._katyusha_interval = 1 * 3600  # 1 jam dalam detik
 
         # State
         self._phase         = "h1_scan"
@@ -957,14 +957,14 @@ KEMAMPUANMU:
                     for t in triggered:
                         logger.info(f"[TRIGGER] {t['condition'].upper()} @ {t['level']:.2f} | {t['reason'][:60]}")
 
-                # 3. Katyusha review setiap 5 jam
+                # 3. Katyusha review setiap 1 jam
                 import time as _time
                 now_ts = _time.time()
                 if (self._katyusha_key and
                         now_ts - self._last_katyusha_ts >= self._katyusha_interval and
                         self._phase != "h1_scan"):
                     self._last_katyusha_ts = now_ts
-                    logger.info("[KATYUSHA] Waktunya review 5 jam...")
+                    logger.info("[KATYUSHA] Waktunya review 1 jam...")
                     bot_state = {
                         "phase":     self._phase,
                         "watchlist": self.watchlist.to_api_dict(),
