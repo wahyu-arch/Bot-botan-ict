@@ -1,129 +1,60 @@
 {
-  "_version": 3,
+  "_version": 9,
   "_last_updated": null,
-  "_update_reason": "v28→v29: hapus skip_if_mss_outside_fvg, entry tidak lagi terikat FVG, tambah max_confidence_allowed, tambah multi-symbol mock prices",
+  "_update_reason": "Katyusha review: ",
   "_update_count": 0,
-  "_source": "bott_v4 — sistem terbukti, dirangkum sebagai rules awal",
   "bos_h1": {
     "lookback_candles": 100,
+    "swing_min_candles": 1,
     "swing_left": 8,
-    "swing_right": 8,
-    "detection": "close_candle",
-    "comment": "BOS H1: close candle melewati swing high/low terakhir. Swing dideteksi dengan 8 candle kiri dan 8 kanan."
+    "swing_right": 8
   },
-  "fvg_h1": {
-    "detection": "gap_between_candle1_and_candle3",
-    "touch_rule": "wick_only",
-    "body_break_action": "invalidate_move_to_next",
-    "freshness": "no_close_through_fvg_after_formation",
-    "entry_level_long": "fvg_top",
-    "entry_level_short": "fvg_bottom",
-    "comment": "FVG H1 dipakai sebagai REFERENSI struktur dan zone — bukan syarat wajib entry. Entry bisa di mana saja asal MSS terkonfirmasi.",
-    "on_wick_touch": "proceed_to_idm_m5"
+  "idm_h1": {
+    "gap_min_candles": 1,
+    "max_search_candles": 10
   },
   "idm_m5": {
-    "detection": "state_machine_replay",
-    "states": [
-      "SINGLE_MOVE",
-      "KONSOLIDASI",
-      "TUNGGU_SENTUH"
-    ],
-    "long_idm_level": "high_candle_A",
-    "short_idm_level": "low_candle_A",
     "gap_min_candles": 1,
-    "max_search_candles": 200,
-    "touch_rule": "wick_or_body",
-    "on_new_lower_low_in_tunggu_sentuh": "reset_to_single_move",
-    "comment": "IDM M5 replay kiri ke kanan. Long: level IDM = high A. Short: level IDM = low A."
+    "max_search_candles": 10
+  },
+  "swing_range": {
+    "min_range_pct": 0.3
+  },
+  "ob": {
+    "sweep_fakeout_buffer_pct": 0,
+    "require_body_close": true
   },
   "bos_m5": {
-    "lookback_candles": 200,
-    "anchor": "swing_h1_timestamp",
-    "long_bos_condition": "close_below_freeze_low",
-    "short_bos_condition": "close_above_freeze_high",
-    "freeze_range": "from_idm_start_to_idm_touch_candle",
-    "require_idm_first": true,
-    "on_bos_confirmed": "update_anchor_to_bos_candle_ts",
-    "comment": "BOS M5: setelah IDM disentuh, freeze range candle IDM-start ke IDM-touch."
+    "lookback_candles": 150,
+    "require_idm_first": true
   },
   "mss_m5": {
-    "enabled": true,
-    "long_mss_condition": "close_above_freeze_high",
-    "short_mss_condition": "close_below_freeze_low",
-    "freeze_range": "same_as_bos_m5_freeze",
-    "on_opposite_break": "reset_to_idm_hunt",
-    "mss_candle_sl_long": "low_of_mss_candle",
-    "mss_candle_sl_short": "high_of_mss_candle",
-    "comment": "MSS M5 setelah BOS M5 + IDM baru disentuh. Konfirmasi entry tanpa syarat harus di dalam FVG."
+    "enabled": true
   },
   "entry": {
-    "min_confidence": 0.6,
-    "max_confidence_allowed": 0.85,
-    "condition": "mss_confirmed",
-    "long_entry_type": "market_or_limit_near_mss",
-    "short_entry_type": "market_or_limit_near_mss",
-    "skip_if_mss_outside_fvg": false,
-    "on_skip": "reset_to_idm_hunt",
-    "order_type": "limit",
+    "min_confidence": 0.65,
+    "prefer_setup": "RBS_SBR",
     "allowed_setups": [
-      "MSS_confirmed",
-      "MSS_in_FVG",
-      "Quasimodo",
       "RBS",
-      "OB_retest",
-      "MSNR_support",
-      "MSS_outside_FVG"
+      "SBR"
     ],
-    "comment": "Entry saat MSS M5 terkonfirmasi. FVG hanya sebagai referensi zona, bukan syarat wajib. max_confidence_allowed = batas atas — AI tidak boleh naikkan min_confidence melebihi nilai ini."
+    "require_m5_structure_confirm": true,
+    "entry_type": "limit"
   },
   "sl": {
     "use_msnr": false,
-    "source": "mss_candle_extreme",
-    "long_sl": "low_of_mss_candle",
-    "short_sl": "high_of_mss_candle",
-    "buffer_pct": 0.0,
-    "comment": "SL = low candle MSS (Long) atau high candle MSS (Short)."
+    "buffer_pct": 0,
+    "sl_position": "mss_wick"
   },
   "tp": {
-    "min_rr": 2.0,
-    "target": "max_high_since_bos_h1",
-    "long_tp": "max_high_from_ref_idx_to_now",
-    "short_tp": "min_low_from_ref_idx_to_now",
-    "comment": "TP = high tertinggi (Long) atau low terendah (Short) sejak BOS H1. Minimum RR 2:1."
-  },
-  "risk": {
-    "risk_per_trade_pct": 1.0,
-    "comment": "Risk 1% per trade dari total equity."
-  },
-  "trailing_sl": {
-    "enabled": true,
-    "activate_at_profit_pct": 2.0,
-    "move_sl_to_pct": 1.0,
-    "comment": "Saat profit >= 2%, pindah SL ke +1% dari entry."
+    "min_rr": 2,
+    "target": "next_liquidity"
   },
   "filter": {
-    "skip_if_ranging": false,
-    "cancel_if_tp_hit_before_fvg": true,
-    "cancel_if_trend_breaks": true,
-    "trend_break_long": "close_h1_below_last_swing_low",
-    "trend_break_short": "close_h1_above_last_swing_high",
-    "skip_if_no_fvg_found": false,
-    "comment": "skip_if_no_fvg_found = false karena entry tidak lagi terikat FVG."
+    "skip_if_ranging": true,
+    "ranging_threshold_pct": 0.5
   },
-  "swing_range": {
-    "min_range_pct": 0.3,
-    "anchor_source": "fvg_h1_touch_timestamp",
-    "m5_data_limit": 200,
-    "comment": "Data M5 diambil dari timestamp swing H1."
-  },
-  "ob": {
-    "sweep_fakeout_buffer_pct": 0.0,
-    "require_body_close": true,
-    "comment": "OB sweep: perlu close body untuk konfirmasi break."
-  },
-  "bos_h1_invalidation": {
-    "long_invalid_if": "close_h1_below_swing_low_h1",
-    "short_invalid_if": "close_h1_above_swing_high_h1",
-    "comment": "BOS H1 dan semua setup batal jika close H1 menembus swing referensi BOS."
+  "fvg": {
+    "max_distance_pct_from_price": 1.5
   }
 }

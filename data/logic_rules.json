@@ -5,8 +5,8 @@
   "_update_count": 0,
   "find_bos_h1": {
     "method": "swing_break",
-    "swing_left": 8,
-    "swing_right": 8,
+    "swing_left": 15,
+    "swing_right": 15,
     "lookback": 100,
     "confirmation": "close_candle",
     "bullish_condition": "close > last_swing_high",
@@ -24,7 +24,7 @@
     "wick_touch_valid": true,
     "body_break_invalid": true,
     "min_gap_pct": 0.05,
-    "lookback": 20,
+    "lookback": 1000,
     "role": "reference_zone_only",
     "comment": "FVG H1 digunakan sebagai referensi zona saja — bukan filter wajib entry. Entry tetap valid di luar FVG jika MSS terkonfirmasi."
   },
@@ -65,7 +65,7 @@
     "on_mss": "proceed_to_entry",
     "on_opposite_break": "reset_idm_hunt",
     "comment": "MSS M5 opsional — kalau ada lebih bagus (naikkan confidence), tapi entry tidak menunggu MSS. IDM confirmed sudah cukup.",
-    "required_for_entry": false
+    "required_for_entry": true
   },
   "entry": {
     "condition": "idm_confirmed",
@@ -75,7 +75,7 @@
     "order_type": "limit",
     "skip_if_outside_fvg": false,
     "comment": "Entry saat IDM M5 terkonfirmasi (disentuh). MSS TIDAK wajib. FVG hanya referensi. Flow: BOS H1 → FVG H1 disentuh → IDM M5 confirmed → Entry.",
-    "mss_required": false
+    "mss_required": true
   },
   "stop_loss": {
     "source": "mss_candle_extreme",
