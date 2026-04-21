@@ -1,0 +1,60 @@
+{
+  "_version": 9,
+  "_last_updated": null,
+  "_update_reason": "Katyusha review: ",
+  "_update_count": 0,
+  "bos_h1": {
+    "lookback_candles": 100,
+    "swing_min_candles": 1,
+    "swing_left": 8,
+    "swing_right": 8
+  },
+  "idm_h1": {
+    "gap_min_candles": 1,
+    "max_search_candles": 10
+  },
+  "idm_m5": {
+    "gap_min_candles": 1,
+    "max_search_candles": 10
+  },
+  "swing_range": {
+    "min_range_pct": 0.3
+  },
+  "ob": {
+    "sweep_fakeout_buffer_pct": 0,
+    "require_body_close": true
+  },
+  "bos_m5": {
+    "lookback_candles": 150,
+    "require_idm_first": true
+  },
+  "mss_m5": {
+    "enabled": true
+  },
+  "entry": {
+    "min_confidence": 0.65,
+    "prefer_setup": "RBS_SBR",
+    "allowed_setups": [
+      "RBS",
+      "SBR"
+    ],
+    "require_m5_structure_confirm": true,
+    "entry_type": "limit"
+  },
+  "sl": {
+    "use_msnr": false,
+    "buffer_pct": 0,
+    "sl_position": "mss_wick"
+  },
+  "tp": {
+    "min_rr": 2,
+    "target": "next_liquidity"
+  },
+  "filter": {
+    "skip_if_ranging": true,
+    "ranging_threshold_pct": 0.5
+  },
+  "fvg": {
+    "max_distance_pct_from_price": 1.5
+  }
+}

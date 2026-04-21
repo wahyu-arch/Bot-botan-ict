@@ -1,0 +1,104 @@
+{
+  "_version": 4,
+  "_last_updated": "2026-04-21",
+  "_update_reason": "Flow diubah: BOS → FVG → IDM confirmed → Entry (MSS tidak wajib)",
+  "_update_count": 0,
+  "find_bos_h1": {
+    "method": "swing_break",
+    "swing_left": 15,
+    "swing_right": 15,
+    "lookback": 100,
+    "confirmation": "close_candle",
+    "bullish_condition": "close > last_swing_high",
+    "bearish_condition": "close < last_swing_low",
+    "comment": "BOS H1: close candle melewati swing high/low. Swing pakai 8 kiri 8 kanan.",
+    "swing_definition": "Swing low valid = candle X punya low terendah, MINIMAL swing_left=8 candle sebelumnya tidak ada yang lebih rendah, DAN minimal swing_right=8 candle sesudahnya tidak ada yang lebih rendah. BOS bearish = ada candle yang CLOSE di bawah swing low valid tersebut. Gunakan low PERSIS dari candle swing — jangan bulatkan.",
+    "example": "Contoh: candle idx=10 buat low 0.1952. Candle idx=1..9 tidak ada yang low < 0.1952 (swing_left ok). Candle idx=11..18 tidak ada yang low < 0.1952 (swing_right=8 ok). Candle idx=19 close di 0.1890 < 0.1952 → BOS bearish terkonfirmasi di 0.1952."
+  },
+  "find_fvg_h1": {
+    "method": "three_candle_gap",
+    "bullish_condition": "candle1_high < candle3_low",
+    "bearish_condition": "candle1_low > candle3_high",
+    "filter_by_bos": true,
+    "filled_condition": "price_closed_through_fvg",
+    "wick_touch_valid": true,
+    "body_break_invalid": true,
+    "min_gap_pct": 0.05,
+    "lookback": 1000,
+    "role": "reference_zone_only",
+    "comment": "FVG H1 digunakan sebagai referensi zona saja — bukan filter wajib entry. Entry tetap valid di luar FVG jika MSS terkonfirmasi."
+  },
+  "find_idm_m5": {
+    "method": "state_machine",
+    "bullish": {
+      "candle_a": "swing_high",
+      "gap_condition": "next_candles_dont_break_high_a",
+      "gap_min_candles": 1,
+      "trigger_condition": "candle_breaks_high_a",
+      "watch_level": "low_of_candle_a",
+      "touch_rule": "wick_or_body"
+    },
+    "bearish": {
+      "candle_a": "swing_low",
+      "gap_condition": "next_candles_dont_break_low_a",
+      "gap_min_candles": 1,
+      "trigger_condition": "candle_breaks_low_a",
+      "watch_level": "high_of_candle_a",
+      "touch_rule": "wick_or_body"
+    },
+    "max_search_candles": 200,
+    "comment": "IDM M5: candle A → gap → tembus. Watch level = low/high candle A."
+  },
+  "find_bos_m5": {
+    "method": "freeze_range",
+    "freeze_from": "idm_start_candle",
+    "freeze_to": "idm_touch_candle",
+    "bullish_bos": "close_below_freeze_low",
+    "bearish_bos": "close_above_freeze_high",
+    "require_idm_first": true,
+    "comment": "BOS M5: setelah IDM disentuh, freeze range. BOS = close melewati batas freeze."
+  },
+  "find_mss_m5": {
+    "enabled": true,
+    "bullish_mss": "close_above_freeze_high_after_bearish_bos",
+    "bearish_mss": "close_below_freeze_low_after_bullish_bos",
+    "on_mss": "proceed_to_entry",
+    "on_opposite_break": "reset_idm_hunt",
+    "comment": "MSS M5 opsional — kalau ada lebih bagus (naikkan confidence), tapi entry tidak menunggu MSS. IDM confirmed sudah cukup.",
+    "required_for_entry": true
+  },
+  "entry": {
+    "condition": "idm_confirmed",
+    "fvg_role": "reference_only",
+    "long_price": "close_of_mss_candle_or_limit_near_mss",
+    "short_price": "close_of_mss_candle_or_limit_near_mss",
+    "order_type": "limit",
+    "skip_if_outside_fvg": false,
+    "comment": "Entry saat IDM M5 terkonfirmasi (disentuh). MSS TIDAK wajib. FVG hanya referensi. Flow: BOS H1 → FVG H1 disentuh → IDM M5 confirmed → Entry.",
+    "mss_required": true
+  },
+  "stop_loss": {
+    "source": "mss_candle_extreme",
+    "long_sl": "low_of_mss_candle",
+    "short_sl": "high_of_mss_candle",
+    "buffer_pct": 0.0,
+    "comment": "SL = low/high candle MSS."
+  },
+  "take_profit": {
+    "target": "structure_high_low_since_bos",
+    "long_tp": "highest_high_since_bos_h1",
+    "short_tp": "lowest_low_since_bos_h1",
+    "min_rr": 2.0,
+    "comment": "TP = high/low tertinggi sejak BOS H1. Min RR 2:1."
+  },
+  "bos_h1_invalidation": {
+    "bullish_invalid": "close_h1_below_sl_before_bos",
+    "bearish_invalid": "close_h1_above_sh_before_bos",
+    "comment": "BOS H1 batal kalau close menembus swing referensi sebelum BOS."
+  },
+  "shina": {
+    "entry_gate": "idm_confirmed_only",
+    "fvg_not_required": true,
+    "comment": "Shina konfirmasi BOS/MSS M5. Entry bisa tanpa MSS — IDM confirmed sudah cukup sebagai sinyal."
+  }
+}

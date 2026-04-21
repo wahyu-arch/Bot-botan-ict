@@ -1,0 +1,26 @@
+[
+  {
+    "id": "wl_20260417_010236",
+    "level": 99.0,
+    "condition": "touch",
+    "reason": "FVG bullish low @ 99.0",
+    "phase": "fvg_wait",
+    "triggered": true,
+    "created_at": "2026-04-17T01:02:36.975428+00:00",
+    "triggered_at": "2026-04-17T01:02:36.975641+00:00",
+    "session_ref": "s001",
+    "triggered_price": 98.9
+  },
+  {
+    "id": "wl_20260417_010236",
+    "level": 97.0,
+    "condition": "touch",
+    "reason": "IDM bearish watch",
+    "phase": "bos_guard",
+    "triggered": true,
+    "created_at": "2026-04-17T01:02:36.976164+00:00",
+    "triggered_at": "2026-04-17T01:02:36.976341+00:00",
+    "session_ref": "s001",
+    "triggered_price": 96.8
+  }
+]
