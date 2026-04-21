@@ -347,7 +347,7 @@ class BotCore:
             msg = f"Hiura: memantau {self.symbol} @ {raw_data.get('price',0):.4f}"
         api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
 
-        if bos_found and bos_level != self._last_bos_lvl:
+        if bos_found and abs(bos_level - self._last_bos_lvl) > 1e-9:  # toleransi floating point
             self._last_bos_lvl = bos_level
             bos_type = result.get("bos_type", "")
             sh       = result.get("sh_since_bos", 0) or result.get("bos_level", 0)
@@ -1020,7 +1020,7 @@ KEMAMPUANMU:
                         self._run_bos_guard(raw, triggered)
                     else:
                         active = self.watchlist.get_active()
-                        logger.info(f"[BOS GUARD] {price:.4f} | tunggu IDM touch | watchlist: {len(active)} level")
+                        logger.info(f"[BOS GUARD] {price} | tunggu IDM touch | watchlist: {len(active)} level")
 
                 elif self._phase == "entry_sniper":
                     self._run_entry_sniper(raw)
@@ -1043,7 +1043,7 @@ KEMAMPUANMU:
                 # Stats
                 stats = self.memory.get_stats()
                 logger.info(
-                    f"[BOT] {price:.2f} | Fase: {self._phase} | "
+                    f"[BOT] {price} | Fase: {self._phase} | "
                     f"Watchlist: {len(self.watchlist.get_active())} level | "
                     f"Trades: {stats['total_trades']} | WR: {stats['win_rate']:.0%}"
                 )

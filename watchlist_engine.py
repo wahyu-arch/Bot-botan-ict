@@ -38,6 +38,18 @@ logger = logging.getLogger(__name__)
 WATCHLIST_FILE = "data/watchlist.json"
 
 
+def _smart_decimals(price: float) -> int:
+    """Tentukan jumlah desimal berdasarkan magnitude harga."""
+    if price <= 0:
+        return 6
+    if price >= 1000:   return 2   # BTC, ETH
+    if price >= 10:     return 3
+    if price >= 1:      return 4
+    if price >= 0.1:    return 5
+    if price >= 0.01:   return 6
+    return 8                        # sangat kecil (SHIB, dll)
+
+
 class WatchlistEngine:
     def __init__(self):
         os.makedirs("data", exist_ok=True)
@@ -60,7 +72,7 @@ class WatchlistEngine:
         """Tambah item watchlist baru."""
         item = {
             "id": f"wl_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-            "level": round(level, 2),
+            "level": round(level, _smart_decimals(level)),
             "condition": condition,
             "reason": reason,
             "phase": phase,
@@ -73,7 +85,7 @@ class WatchlistEngine:
         self.items.append(item)
         self._save()
         logger.info(
-            f"[WATCHLIST] +Tambah | {condition.upper()} @ {level:.2f} | "
+            f"[WATCHLIST] +Tambah | {condition.upper()} @ {level} | "
             f"Phase: {phase} | Reason: {reason}"
         )
         return item
@@ -128,8 +140,8 @@ class WatchlistEngine:
                 item["triggered_price"] = round(current_price, 2)
                 triggered_now.append(item)
                 logger.info(
-                    f"[WATCHLIST] 🔔 TRIGGER | {cond.upper()} @ {level:.2f} | "
-                    f"Harga: {current_price:.2f} | Phase: {item['phase']} | {item['reason']}"
+                    f"[WATCHLIST] 🔔 TRIGGER | {cond.upper()} @ {level} | "
+                    f"Harga: {current_price} | Phase: {item['phase']} | {item['reason']}"
                 )
 
         if triggered_now:
@@ -144,7 +156,7 @@ class WatchlistEngine:
         active = self.get_active()
         if not active:
             return "Watchlist kosong"
-        lines = [f"  {i['condition'].upper()} @ {i['level']:.2f} [{i['phase']}] — {i['reason']}"
+        lines = [f"  {i['condition'].upper()} @ {i['level']} [{i['phase']}] — {i['reason']}"
                  for i in active]
         return "\n".join(lines)
 
