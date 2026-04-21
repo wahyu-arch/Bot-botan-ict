@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from groq import Groq
-from candle_replay import build_h1_analysis, build_m5_analysis, format_replay_for_ai
+from candle_replay import ReplayEngine, format_replay_for_ai
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +117,9 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     h1_table = _candle_table(raw_data["h1"], limit=100)
     price = raw_data["price"]
 
-    # Python replay H1 kiri ke kanan — hasilnya dikirim ke Hiura
-    try:
-        h1_replay = build_h1_analysis(raw_data["h1"], json_data.get("logic_raw", {}))
-        replay_text = format_replay_for_ai(h1_result=h1_replay)
-    except Exception as _e:
-        replay_text = f"(replay error: {_e})"
-        h1_replay = {}
+    # Replay sudah dihandle di bot_core via ReplayEngine
+    # ai_analysts hanya terima replay_text dari ctx kalau ada
+    replay_text = ctx.get("replay_text", "") if ctx else ""
 
     # Baca rules dari JSON untuk inject ke prompt
     # Baca langsung dari file JSON — sumber kebenaran

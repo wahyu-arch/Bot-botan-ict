@@ -169,14 +169,15 @@ class BotCore:
     def _logic_ctx(self) -> str:
         return self.logic.get_context_for_ai()
 
-    def _full_ctx(self) -> dict:
-        """Return semua JSON config yang harus dibaca AI sebelum analisis."""
+    def _full_ctx(self, replay_text: str = "") -> dict:
+        """Return semua JSON config + replay state untuk AI."""
         import json
         return {
-            "rules":     json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
-            "logic":     json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
-            "logic_raw": {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},  # raw dict untuk AI baca field spesifik
-            "prompts":   json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "rules":      json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "logic":      json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "logic_raw":  {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},
+            "prompts":    json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, indent=2),
+            "replay_text": replay_text,  # hasil replay engine untuk Hiura
         }
 
     # ── Phase Handlers ───────────────────────────────────
@@ -307,7 +308,7 @@ class BotCore:
         if event == "bos":
             result = hiura_h1_analysis(
                 self.clients[0], self.model_ai1,
-                raw_data, self._full_ctx(),
+                raw_data, self._full_ctx(replay_text=replay_text),
                 prompt_ctx=self.prompts.build_context('hiura')
             )
             self._hiura_data = result
