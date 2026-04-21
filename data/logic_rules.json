@@ -1,7 +1,7 @@
 {
-  "_version": 3,
-  "_last_updated": null,
-  "_update_reason": "Perjelas definisi swing BOS agar AI baca rules dengan benar",
+  "_version": 4,
+  "_last_updated": "2026-04-21",
+  "_update_reason": "Flow diubah: BOS → FVG → IDM confirmed → Entry (MSS tidak wajib)",
   "_update_count": 0,
   "find_bos_h1": {
     "method": "swing_break",
@@ -64,16 +64,18 @@
     "bearish_mss": "close_below_freeze_low_after_bullish_bos",
     "on_mss": "proceed_to_entry",
     "on_opposite_break": "reset_idm_hunt",
-    "comment": "MSS M5: setelah BOS M5, IDM baru disentuh, harga break ke arah berlawanan = MSS. Entry langsung tanpa cek FVG."
+    "comment": "MSS M5 opsional — kalau ada lebih bagus (naikkan confidence), tapi entry tidak menunggu MSS. IDM confirmed sudah cukup.",
+    "required_for_entry": false
   },
   "entry": {
-    "condition": "mss_confirmed",
+    "condition": "idm_confirmed",
     "fvg_role": "reference_only",
     "long_price": "close_of_mss_candle_or_limit_near_mss",
     "short_price": "close_of_mss_candle_or_limit_near_mss",
     "order_type": "limit",
     "skip_if_outside_fvg": false,
-    "comment": "Entry saat MSS terkonfirmasi. FVG hanya info tambahan untuk AI, bukan gate wajib."
+    "comment": "Entry saat IDM M5 terkonfirmasi (disentuh). MSS TIDAK wajib. FVG hanya referensi. Flow: BOS H1 → FVG H1 disentuh → IDM M5 confirmed → Entry.",
+    "mss_required": false
   },
   "stop_loss": {
     "source": "mss_candle_extreme",
@@ -93,5 +95,10 @@
     "bullish_invalid": "close_h1_below_sl_before_bos",
     "bearish_invalid": "close_h1_above_sh_before_bos",
     "comment": "BOS H1 batal kalau close menembus swing referensi sebelum BOS."
+  },
+  "shina": {
+    "entry_gate": "idm_confirmed_only",
+    "fvg_not_required": true,
+    "comment": "Shina konfirmasi BOS/MSS M5. Entry bisa tanpa MSS — IDM confirmed sudah cukup sebagai sinyal."
   }
 }
