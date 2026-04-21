@@ -660,11 +660,18 @@ FORMAT PERUBAHAN:
 - rules_removes: hapus key. Format: [{{"section":"filter","key":"skip_if_ranging","reason":"..."}}]
 - Sama untuk logic_changes, logic_adds, logic_removes
 
+FASE YANG TERSEDIA untuk force_phase:
+- "h1_scan"     → Hiura scan ulang BOS H1
+- "fvg_wait"    → tunggu FVG H1 disentuh
+- "idm_hunt"    → Senanan cari IDM M5 (perlu bos & fvg di state)
+- "bos_guard"   → Shina pantau BOS/MSS M5
+- "entry_sniper" → Yusuf hitung entry sekarang
+
 Balas JSON murni:
 {{
   "verdict": "ok|override|warning",
-  "override_action": "none|reset|skip_entry|force_phase",
-  "override_phase": "",
+  "override_action": "none|reset|skip_entry|force_phase|force_idm_hunt|force_entry",
+  "override_phase": "h1_scan|fvg_wait|idm_hunt|bos_guard|entry_sniper",
   "rules_changes": [],
   "rules_adds": [],
   "rules_removes": [],

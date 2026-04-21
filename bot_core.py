@@ -419,13 +419,25 @@ class BotCore:
         """
         price = raw_data.get("price", 0)
 
-        # Replay engine sudah handle FVG touch/filled/CHOCH di replay_h1()
-        # Di sini kita tinggal cek event dari replay yang baru saja dijalankan
-        # Kalau tidak ada trigger dari watchlist (level harga), cek replay state
+        # Jalankan replay setiap siklus untuk immediate check (0 AI token)
+        h1_candles = raw_data.get("h1", [])
+        replay_event = self._replay.replay_h1(h1_candles, current_price=price)
+        r_event = replay_event.get("event", "none")
+
+        if r_event == "fvg_touched":
+            logger.info(f"[FVG WAIT] Replay: FVG touched @ {price}")
+            triggered_items = [{"phase": "fvg_wait", "level": price,
+                                 "reason": "FVG touched (replay check)"}]
+        elif r_event == "choch":
+            msg = f"Hiura: CHOCH — {replay_event['data'].get('reason','')}. Reset."
+            api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
+            self._reset("choch"); self._last_bos_lvl = 0.0; return
+        elif r_event == "all_fvg_filled":
+            api_server.push_live_msg("ai1", "Hiura", "semua FVG filled — reset.", self.symbol)
+            self._reset("all_fvg_filled"); self._last_bos_lvl = 0.0; return
+
         if not triggered_items:
-            state = self._replay.state
-            fvg_cnt = len(self._replay.fvgs)
-            logger.info(f"[FVG WAIT] {price:.4f} | replay_state={state} | FVG={fvg_cnt}")
+            logger.info(f"[FVG WAIT] {price} | FVG={len(self._replay.fvgs)} | tunggu sentuh")
             return
 
         # Dispatch berdasarkan phase dari item yang trigger
@@ -722,12 +734,13 @@ PROMPTS LENGKAP (data/prompts.json):
 {prompts_summary}
 
 KEMAMPUANMU:
-- Jika owner minta ubah rules/logic/prompts → langsung apply dengan format JSON di akhir response:
+- Jika owner minta ubah rules/logic/prompts atau FORCE PHASE → langsung apply:
   <APPLY_CHANGES>
-  {{"rules_changes": [{{"section": "entry", "key": "min_confidence", "new": 0.65, "reason": "..."}}],
-    "logic_changes": [],
-    "prompts_changes": [{{"ai": "hiura", "key": "focus", "new": "...", "reason": "..."}}]}}
+  {{"rules_changes": [], "logic_changes": [], "prompts_changes": [],
+    "override_action": "force_phase",
+    "override_phase": "h1_scan|fvg_wait|idm_hunt|bos_guard|entry_sniper"}}
   </APPLY_CHANGES>
+- Phase yang bisa di-force: h1_scan, fvg_wait, idm_hunt, bos_guard, entry_sniper
 - Jika hanya jawab pertanyaan → tidak perlu blok APPLY_CHANGES
 - Kamu PUNYA MEMORI — ini adalah history chat kita
 - Gaya: santai, informatif, bahasa Indonesia, max 4 kalimat"""
@@ -799,11 +812,25 @@ KEMAMPUANMU:
                         prompts["_version"] = prompts.get("_version",1) + 1
                         self.prompts.save(prompts)
 
+                    # Handle force phase dari chat
+                    oa = changes.get("override_action","")
+                    op = changes.get("override_phase","")
+                    if oa == "force_phase" and op in ("h1_scan","fvg_wait","idm_hunt","bos_guard","entry_sniper"):
+                        old_p = self._phase
+                        self._phase = op
+                        if op == "idm_hunt":   self._replay.state = "IDM_HUNT"
+                        elif op == "bos_guard": self._replay.state = "BOS_GUARD"
+                        elif op == "h1_scan":
+                            self._replay.reset(); self._last_bos_lvl = 0.0
+                        logger.info(f"[CHAT] Katyusha force phase: {old_p} → {op}")
+                        clean_answer += f"\n🎯 Phase dipindah: {old_p} → {op}"
+
                     n = (len(changes.get("rules_changes",[])) + len(changes.get("rules_adds",[])) +
                          len(changes.get("logic_changes",[])) + len(changes.get("logic_adds",[])) +
                          len(changes.get("prompts_changes",[])))
                     logger.info(f"[CHAT] Applied {n} perubahan")
-                    clean_answer += f"\n✅ {n} perubahan berhasil disimpan ke file JSON!"
+                    if n > 0:
+                        clean_answer += f"\n✅ {n} perubahan berhasil disimpan ke file JSON!"
 
                 except json.JSONDecodeError as je:
                     logger.error(f"[CHAT] JSON parse error: {je} | raw: {raw_json[:150]}")
@@ -988,20 +1015,40 @@ KEMAMPUANMU:
 
                     # Override bot state
                     action = k_result.get("override_action", "none")
-                    if action == "reset":
+                    if action in ("reset",):
                         logger.info(f"[KATYUSHA] OVERRIDE: reset | {k_result.get('reasoning','')}")
                         self._last_bos_lvl = 0.0
-                        self._reset("katyusha_override_reset")
-                    elif action == "force_phase":
+                        self._replay.reset()
+                        self._reset("katyusha_reset")
+
+                    elif action in ("force_phase", "force_idm_hunt", "force_entry"):
                         new_phase = k_result.get("override_phase", "")
-                        if new_phase:
-                            logger.info(f"[KATYUSHA] OVERRIDE: force_phase → {new_phase}")
+                        # Map action ke phase
+                        if action == "force_idm_hunt": new_phase = "idm_hunt"
+                        if action == "force_entry":     new_phase = "entry_sniper"
+                        if new_phase in ("h1_scan","fvg_wait","idm_hunt","bos_guard","entry_sniper"):
+                            old_phase = self._phase
                             self._phase = new_phase
+                            # Kalau force ke idm_hunt, pastikan replay juga di state IDM_HUNT
+                            if new_phase == "idm_hunt":
+                                self._replay.state = "IDM_HUNT"
+                            elif new_phase == "bos_guard":
+                                self._replay.state = "BOS_GUARD"
+                            elif new_phase == "h1_scan":
+                                self._replay.reset()
+                                self._last_bos_lvl = 0.0
+                            logger.info(f"[KATYUSHA] OVERRIDE: {old_phase} → {new_phase}")
+                            msg_k = f"Katyusha: force phase {old_phase} → {new_phase}. {k_result.get('reasoning','')[:80]}"
+                            api_server.push_live_msg("katyusha", "Katyusha", msg_k, self.symbol)
+                        else:
+                            logger.warning(f"[KATYUSHA] Invalid override_phase: {new_phase}")
+
                     elif action == "skip_entry":
                         logger.info("[KATYUSHA] OVERRIDE: skip_entry")
                         self._reset("katyusha_skip_entry")
+
                     elif k_result.get("verdict") == "warning":
-                        logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}") 
+                        logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}")  
 
                 # 4. Dispatch ke fase yang tepat
                 if self._phase == "h1_scan":
