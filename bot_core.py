@@ -652,24 +652,50 @@ KEMAMPUANMU:
             apply_match = _re.search(r"<APPLY_CHANGES>(.*?)</APPLY_CHANGES>", answer, _re.DOTALL)
             clean_answer = _re.sub(r"<APPLY_CHANGES>.*?</APPLY_CHANGES>", "", answer, flags=_re.DOTALL).strip()
             if apply_match:
+                raw_json = apply_match.group(1).strip()
+                logger.info(f"[CHAT] APPLY_CHANGES: {raw_json[:300]}")
                 try:
-                    changes = json.loads(apply_match.group(1).strip())
+                    # Hapus log lines yang mungkin masuk di tengah JSON
+                    clean_lines = [l for l in raw_json.splitlines()
+                                   if not any(x in l for x in ["GET /","POST /","HTTP/1.1","| INFO |","| WARNING |"])]
+                    changes = json.loads("\n".join(clean_lines))
+
+                    # Apply rules + logic + prompt_updates
                     self._katyusha_apply_changes(changes)
-                    # Apply prompts changes
+
+                    # Apply prompts_changes (format dari user chat)
+                    prompts = self.prompts.prompts
+                    p_dirty = False
                     for ch in changes.get("prompts_changes", []):
-                        ai_key = ch.get("ai", "")
-                        key    = ch.get("key", "")
-                        val    = ch.get("new")
-                        if ai_key and key and val is not None:
-                            if ai_key not in self.prompts.prompts:
-                                self.prompts.prompts[ai_key] = {}
-                            self.prompts.prompts[ai_key][key] = val
-                    if changes.get("prompts_changes"):
-                        self.prompts.save(self.prompts.prompts)
-                    logger.info(f"[CHAT] Katyusha applied changes dari chat")
-                    clean_answer += "\n✅ Perubahan sudah diapply!"
+                        ai_k = ch.get("ai","").lower()
+                        fld  = ch.get("key","")
+                        val  = ch.get("new")
+                        if ai_k and fld and val is not None:
+                            prompts.setdefault(ai_k, {})[fld] = val
+                            p_dirty = True
+                            logger.info(f"[CHAT] prompt {ai_k}.{fld} = {str(val)[:60]}")
+                    if p_dirty:
+                        prompts["_update_reason"] = "Katyusha via chat"
+                        prompts["_version"] = prompts.get("_version",1) + 1
+                        self.prompts.save(prompts)
+
+                    n = (len(changes.get("rules_changes",[])) + len(changes.get("rules_adds",[])) +
+                         len(changes.get("logic_changes",[])) + len(changes.get("logic_adds",[])) +
+                         len(changes.get("prompts_changes",[])))
+                    logger.info(f"[CHAT] Applied {n} perubahan")
+                    clean_answer += f"\n✅ {n} perubahan berhasil disimpan ke file JSON!"
+
+                except json.JSONDecodeError as je:
+                    logger.error(f"[CHAT] JSON parse error: {je} | raw: {raw_json[:150]}")
+                    clean_answer += "\n⚠️ Format JSON salah, perubahan gagal diparse."
                 except Exception as apply_err:
-                    logger.warning(f"[CHAT] Gagal apply changes: {apply_err}")
+                    logger.error(f"[CHAT] Gagal apply: {apply_err}")
+                    clean_answer += f"\n⚠️ Gagal apply: {str(apply_err)[:80]}"
+            else:
+                # Deteksi kalau Katyusha klaim sudah ubah tapi tidak ada blok
+                if any(x in answer.lower() for x in ["sudah diubah","sudah saya ubah","berhasil diubah","telah diubah","saya ubah"]):
+                    logger.warning("[CHAT] Katyusha klaim ubah tapi tidak ada APPLY_CHANGES block!")
+                    clean_answer += "\n⚠️ Katyusha tidak menyertakan blok perubahan. Coba tanya lagi: 'ubah sekarang dengan format APPLY_CHANGES'"
 
             # Push jawaban ke API
             _req.post(
