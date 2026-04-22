@@ -108,6 +108,7 @@ class BotCore:
         # State
         self._phase         = "h1_scan"
         self._session_id    = ""
+        self._pending_hiura_msg = ""  # pesan Hiura disimpan, di-push saat sesi dibuat
         self._prev_price    = 0.0
         self._last_bos_lvl  = 0.0  # hindari sesi duplikat BOS sama
 
@@ -146,6 +147,7 @@ class BotCore:
         if self._session_id:
             self._finish_session({"consensus": reason or "reset"})
         self._session_id = ""
+        self._pending_hiura_msg = ""
 
     async def _wait_next_m5_close(self):
         """
@@ -354,10 +356,8 @@ class BotCore:
             sl       = result.get("sl_before_bos", 0)
             fvgs     = result.get("fvg_list", [])
 
-            # Buat sesi baru + push Hiura
-            self._new_session(raw_data)
-            if msg:
-                self._push("ai1", "Hiura", msg, 1)
+            # Simpan msg Hiura — akan di-push ke sesi saat FVG disentuh
+            self._pending_hiura_msg = msg
 
             self.watchlist.clear_untriggered()
 
@@ -479,11 +479,14 @@ class BotCore:
         item = fvg_items[-1]
         logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.4f} — panggil Senanan")
 
+        # Buat sesi diskusi — ini saat AI pertama kali aktif berdiskusi
         if not self._session_id:
             self._new_session(raw_data)
-            hiura_msg = self._hiura_data.get("chat_msg", "")
-            if hiura_msg:
-                self._push("ai1", "Hiura", hiura_msg, 1)
+            # Push pesan Hiura yang tertunda (dari saat BOS ditemukan)
+            pending = getattr(self, "_pending_hiura_msg", "") or self._hiura_data.get("chat_msg", "")
+            if pending:
+                self._push("ai1", "Hiura", pending, 1)
+                self._pending_hiura_msg = ""
 
         sh = self._hiura_data.get("sh_since_bos", 0)
         sl = self._hiura_data.get("sl_before_bos", 0)
@@ -638,9 +641,22 @@ class BotCore:
             conf  = result.get("confidence", 0)
             min_conf = self.rules.entry_min_confidence
 
-            if entry > 0 and sl > 0 and tp > 0 and conf >= min_conf:
-                direction = result.get("direction", "buy")
+            direction = result.get("direction", "buy")
 
+            # Validasi ketat: entry/SL/TP harus berbeda dan SL distance minimal
+            sl_dist = abs(entry - sl) if entry and sl else 0
+            tp_dist = abs(tp - entry) if tp and entry else 0
+            min_sl_dist = entry * 0.001 if entry else 0.0001  # minimal 0.1% dari harga entry
+            rr_check = tp_dist / sl_dist if sl_dist > 0 else 0
+
+            entry_valid = (
+                entry > 0 and sl > 0 and tp > 0 and
+                abs(entry - sl) > min_sl_dist and   # SL tidak sama dengan entry
+                abs(tp - entry) > min_sl_dist and    # TP tidak sama dengan entry
+                abs(entry - sl) != abs(tp - entry) or rr_check >= 1.5  # RR masuk akal
+            )
+
+            if entry_valid and conf >= min_conf:
                 # Guard: pastikan AI tidak naikkan min_confidence melebihi batas atas
                 max_conf_allowed = self.rules.get("entry", "max_confidence_allowed", default=0.85)
                 if min_conf > max_conf_allowed:
@@ -677,7 +693,13 @@ class BotCore:
                 })
                 logger.info(f"[YUSUF] ENTRY {direction.upper()} @ {entry:.2f} SL={sl:.2f} TP={tp:.2f}")
             else:
-                logger.info(f"[YUSUF] Skip — conf={conf:.0%} < min={min_conf:.0%} atau level 0")
+                if not entry_valid:
+                    logger.warning(
+                        f"[YUSUF] Skip — entry invalid: entry={entry:.6f} sl={sl:.6f} tp={tp:.6f} "
+                        f"sl_dist={sl_dist:.6f} min_sl_dist={min_sl_dist:.6f} rr={rr_check:.1f}"
+                    )
+                else:
+                    logger.info(f"[YUSUF] Skip — conf={conf:.0%} < min={min_conf:.0%}")
                 result["decision"] = "skip"
 
         if decision == "skip":

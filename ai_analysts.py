@@ -430,19 +430,34 @@ def yusuf_entry(client: Groq, model: str, raw_data: dict,
     min_rr = tp_cfg.get("min_rr", 2.0)
     sl_buf = sl_cfg.get("buffer_pct", 0.0)
 
+    # Ambil data M5 terbaru untuk Yusuf bisa lihat level persis
+    m5_recent = _candle_table(raw_data.get("m5", []), limit=20)
+    sh_since_bos = hiura_data.get("sh_since_bos", 0)
+    sl_before_bos = hiura_data.get("sl_before_bos", 0)
+    freeze_high = shina_data.get("freeze_high", 0)
+    freeze_low  = shina_data.get("freeze_low",  0)
+
     prompt = f"""Kamu adalah Yusuf, entry sniper ICT.
 Harga sekarang: {price}
 Bias H1: {bias}
+SH sejak BOS: {sh_since_bos} | SL sebelum BOS: {sl_before_bos}
 MSS candle: High={mss_high} Low={mss_low}
+Freeze range M5: {freeze_low}–{freeze_high}
 
-FVG H1 (hanya sebagai referensi zona, bukan syarat wajib):
+⚠️ PENTING: Gunakan angka PERSIS dari data candle di bawah. JANGAN bulatkan ke 0.21, 0.20 dll.
+Harga koin ini bernilai {price} — presisi 5-6 desimal wajib untuk entry, SL, TP.
+
+CANDLE M5 TERBARU (20 candle terakhir):
+{m5_recent}
+
+FVG H1 (referensi zona):
 {fvg_text}
 
 {mem_text}
 {_build_json_ctx(ctx)}
 
 {('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
-Tentukan entry paling presisi. Gunakan angka PERSIS dari data, jangan bulatkan.
+Tentukan entry paling presisi. Gunakan angka PERSIS dari tabel candle M5 di atas.
 
 RULES ENTRY (dari logic_rules.json — WAJIB DIIKUTI):
 - Entry saat MSS terkonfirmasi
@@ -470,8 +485,8 @@ Balas JSON murni:
   "rr": 0.0,
   "setup_type": "MSS_confirmed|MSS_in_FVG|MSS_outside_FVG|skip",
   "in_fvg_zone": true,
-  "sl_reason": "low/high MSS candle @ X.XX",
-  "tp_reason": "liquidity pool @ X.XX",
+  "sl_reason": "low/high MSS candle @ X.XXXXXX (presisi penuh)",
+  "tp_reason": "liquidity pool @ X.XXXXXX (presisi penuh)",
   "chat_msg": "pesan ke grup WA max 3 kalimat",
   "confidence": 0.0
 }}"""
