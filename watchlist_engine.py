@@ -68,10 +68,14 @@ class WatchlistEngine:
         with open(WATCHLIST_FILE, "w") as f:
             json.dump(self.items, f, indent=2, ensure_ascii=False)
 
-    def add(self, level: float, condition: str, reason: str, phase: str, session_ref: str, symbol: str = "") -> dict:
-        """Tambah item watchlist baru."""
+    def add(self, level: float, condition: str, reason: str, phase: str, session_ref: str,
+             symbol: str = "", assigned_to: str = "", action: str = "") -> dict:
+        """Tambah item watchlist baru.
+        assigned_to: AI yang dipanggil saat trigger (hiura/senanan/shina/yusuf/katyusha/auto)
+        action: aksi spesifik saat trigger (re_analyze/check_bos/check_mss/entry/alert)
+        """
         item = {
-            "id": f"wl_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+            "id": f"wl_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:22]}",
             "level": round(level, _smart_decimals(level)),
             "condition": condition,
             "reason": reason,
@@ -81,6 +85,8 @@ class WatchlistEngine:
             "triggered_at": None,
             "session_ref": session_ref,
             "symbol": symbol,
+            "assigned_to": assigned_to,  # AI yang dipanggil saat trigger
+            "action": action,             # aksi spesifik
         }
         self.items.append(item)
         self._save()

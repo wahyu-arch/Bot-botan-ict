@@ -533,9 +533,34 @@ class BotCore:
         """
         Tunggu IDM M5 disentuh, lalu Shina analisis BOS/MSS.
         """
-        if not triggered_items:
-            logger.info(f"[BOS GUARD] Tunggu IDM M5 touch | harga {raw_data.get('price'):.2f}")
-            return
+        price = raw_data.get("price", 0)
+
+        # Cek watchlist katyusha (assigned_to="katyusha" atau "alert") — trigger alert ke chat
+        katyusha_items = [t for t in triggered_items if t.get("assigned_to") in ("katyusha", "alert")]
+        for kt in katyusha_items:
+            alert_msg = f"⚡ Alert: harga {price} menyentuh level {kt['level']} — {kt['reason']}"
+            self._push("katyusha", "Katyusha", alert_msg, 5)
+            logger.info(f"[KATYUSHA ALERT] {alert_msg}")
+
+        # Cek watchlist yang di-assign ke AI spesifik
+        ai_items = [t for t in triggered_items if t.get("assigned_to") in ("hiura","senanan","shina","yusuf") and t not in katyusha_items]
+
+        if not triggered_items or (triggered_items and not [t for t in triggered_items if t.get("phase") == "bos_guard" and not t.get("assigned_to")]):
+            # Update watchlist dinamis tiap siklus — tambah level baru di sekitar harga kalau watchlist aktif < 2
+            active = self.watchlist.get_active()
+            bos_guard_wl = [w for w in active if w.get("phase") == "bos_guard"]
+            if len(bos_guard_wl) < 2 and self._senanan_data:
+                idm_watch = self._senanan_data.get("watch_level", 0)
+                freeze_h  = self._shina_data.get("freeze_high", 0)
+                freeze_l  = self._shina_data.get("freeze_low",  0)
+                if freeze_h and freeze_l and freeze_h > freeze_l:
+                    self.watchlist.add(level=freeze_h, condition="break_above", reason="freeze high — MSS bullish jika tembus",
+                                       phase="bos_guard", session_ref=self._session_id, assigned_to="shina", action="check_mss")
+                    self.watchlist.add(level=freeze_l, condition="break_below", reason="freeze low — BOS M5 bearish jika tembus",
+                                       phase="bos_guard", session_ref=self._session_id, assigned_to="shina", action="check_mss")
+            if not triggered_items or not [t for t in triggered_items if t.get("phase") == "bos_guard" and not t.get("assigned_to")]:
+                logger.info(f"[BOS GUARD] {price} | tunggu IDM touch | watchlist: {len(bos_guard_wl)} level")
+                return
 
         item = triggered_items[-1]
         logger.info(f"[BOS GUARD] IDM M5 disentuh @ {item['level']:.2f} — panggil Shina")
@@ -734,12 +759,23 @@ PROMPTS LENGKAP (data/prompts.json):
 {prompts_summary}
 
 KEMAMPUANMU:
-- Jika owner minta ubah rules/logic/prompts atau FORCE PHASE → langsung apply:
+- Jika owner minta ubah rules/logic/prompts, force phase, ATAU pasang watchlist → langsung apply:
   <APPLY_CHANGES>
-  {{"rules_changes": [], "logic_changes": [], "prompts_changes": [],
+  {{"rules_changes": [],
+    "logic_changes": [],
+    "prompts_changes": [],
+    "watchlist_adds": [
+      {{"level": 0.205, "condition": "break_above", "reason": "resistance level",
+        "assigned_to": "shina", "action": "check_mss", "phase": "bos_guard"}},
+      {{"level": 0.195, "condition": "touch", "reason": "alert harga kunci",
+        "assigned_to": "katyusha", "action": "alert", "phase": "bos_guard"}}
+    ],
+    "watchlist_clear": false,
     "override_action": "force_phase",
-    "override_phase": "h1_scan|fvg_wait|idm_hunt|bos_guard|entry_sniper"}}
+    "override_phase": ""}}
   </APPLY_CHANGES>
+- assigned_to pilihan: "hiura" (re-scan H1), "senanan" (cari IDM baru), "shina" (cek MSS/BOS), "yusuf" (entry), "katyusha" (alert saja)
+- action pilihan: "re_analyze", "check_mss", "check_bos", "entry", "alert"
 - Phase yang bisa di-force: h1_scan, fvg_wait, idm_hunt, bos_guard, entry_sniper
 - Jika hanya jawab pertanyaan → tidak perlu blok APPLY_CHANGES
 - Kamu PUNYA MEMORI — ini adalah history chat kita
@@ -825,9 +861,28 @@ KEMAMPUANMU:
                         logger.info(f"[CHAT] Katyusha force phase: {old_p} → {op}")
                         clean_answer += f"\n🎯 Phase dipindah: {old_p} → {op}"
 
+                    # Apply watchlist additions dari Katyusha
+                    wl_adds = changes.get("watchlist_adds", [])
+                    for wl in wl_adds:
+                        lvl = float(wl.get("level", 0))
+                        if lvl > 0:
+                            self.watchlist.add(
+                                level=lvl,
+                                condition=wl.get("condition", "touch"),
+                                reason=wl.get("reason", "Katyusha watchlist"),
+                                phase=wl.get("phase", self._phase),
+                                session_ref=self._session_id or "katyusha",
+                                assigned_to=wl.get("assigned_to", "katyusha"),
+                                action=wl.get("action", "alert"),
+                            )
+                            logger.info(f"[KATYUSHA] +Watchlist: {wl.get('condition','touch')} @ {lvl} → assigned={wl.get('assigned_to','katyusha')}")
+                    if changes.get("watchlist_clear"):
+                        self.watchlist.clear_untriggered()
+                        logger.info("[KATYUSHA] Watchlist dibersihkan via chat")
+
                     n = (len(changes.get("rules_changes",[])) + len(changes.get("rules_adds",[])) +
                          len(changes.get("logic_changes",[])) + len(changes.get("logic_adds",[])) +
-                         len(changes.get("prompts_changes",[])))
+                         len(changes.get("prompts_changes",[])) + len(wl_adds))
                     logger.info(f"[CHAT] Applied {n} perubahan")
                     if n > 0:
                         clean_answer += f"\n✅ {n} perubahan berhasil disimpan ke file JSON!"
@@ -1050,6 +1105,25 @@ KEMAMPUANMU:
                     elif k_result.get("verdict") == "warning":
                         logger.warning(f"[KATYUSHA] Warning: {k_result.get('reasoning','')}")  
 
+                # Cek watchlist assigned_to khusus — dispatch ke AI terlepas dari fase
+                assigned_triggered = [t for t in triggered if t.get("assigned_to") and t.get("assigned_to") not in ("katyusha","alert","auto","")]
+                for at in assigned_triggered:
+                    ai_target = at.get("assigned_to", "")
+                    action    = at.get("action", "alert")
+                    logger.info(f"[ASSIGNED] {at['condition']} @ {at['level']} → {ai_target} ({action})")
+                    if ai_target == "hiura":
+                        self._run_h1_scan(raw)
+                    elif ai_target == "senanan":
+                        sh = self._hiura_data.get("sh_since_bos", 0)
+                        sl = self._hiura_data.get("sl_before_bos", 0)
+                        bias = self._hiura_data.get("bias","neutral")
+                        m5_dir = "bearish" if bias == "bullish" else "bullish"
+                        self._run_fvg_wait(raw, [at])  # re-trigger senanan
+                    elif ai_target == "shina":
+                        self._run_bos_guard(raw, [at])
+                    elif ai_target == "yusuf" and action == "entry":
+                        self._run_entry_sniper(raw)
+
                 # 4. Dispatch ke fase yang tepat
                 if self._phase == "h1_scan":
                     phase_before = self._phase
@@ -1063,11 +1137,7 @@ KEMAMPUANMU:
                     self._run_fvg_wait(raw, triggered)
 
                 elif self._phase == "bos_guard":
-                    if triggered:
-                        self._run_bos_guard(raw, triggered)
-                    else:
-                        active = self.watchlist.get_active()
-                        logger.info(f"[BOS GUARD] {price} | tunggu IDM touch | watchlist: {len(active)} level")
+                    self._run_bos_guard(raw, triggered)
 
                 elif self._phase == "entry_sniper":
                     self._run_entry_sniper(raw)
