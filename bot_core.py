@@ -355,7 +355,9 @@ class BotCore:
             msg = f"Hiura: memantau {self.symbol} @ {raw_data.get('price',0):.4f}"
         api_server.push_live_msg("ai1", "Hiura", msg, self.symbol)
 
-        if bos_found and abs(bos_level - self._last_bos_lvl) > 1e-9:  # toleransi floating point
+        # Hanya proses BOS baru kalau fase memang h1_scan
+        # Jangan interupsi fvg_wait/idm_hunt karena replay selalu menemukan BOS yang sama
+        if bos_found and abs(bos_level - self._last_bos_lvl) > 1e-9 and self._phase == "h1_scan":
             self._last_bos_lvl = bos_level
             bos_type = result.get("bos_type", "")
             sh       = result.get("sh_since_bos", 0) or result.get("bos_level", 0)
@@ -408,11 +410,10 @@ class BotCore:
                        f"FVG={len([f for f in fvgs if not f.get('filled')])} | "
                        f"Watchlist={len(self.watchlist.get_active())} level | Fase → fvg_wait")
 
-        elif bos_found:
-            if msg and self._session_id:
-                self._push("ai1", "Hiura", msg, 1)
-            logger.info(f"[HIURA] BOS sama @ {bos_level:.4f}")
-        else:
+        elif bos_found and self._phase == "h1_scan":
+            # BOS sama tapi belum di-set — edge case, skip
+            logger.info(f"[HIURA] BOS {bos_level} sudah ada, fase sudah {self._phase}")
+        elif not bos_found:
             logger.info(f"[HIURA] Belum ada BOS | harga {raw_data.get('price')}")
 
     def _run_fvg_wait(self, raw_data: dict, triggered_items: list):
