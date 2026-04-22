@@ -141,7 +141,7 @@ def push_live_msg(ai: str, nama: str, pesan: str, symbol: str = ""):
         "ronde": 0,
         "side": "right" if ai == "yusuf" else "left",
     })
-    _live_feed = _live_feed[-100:]  # max 100 pesan
+    _live_feed = _live_feed[-500:]  # max 500 pesan — cukup untuk satu trading session
 
 
 @app.route("/api/live/feed")

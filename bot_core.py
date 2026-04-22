@@ -130,7 +130,13 @@ class BotCore:
         return sid
 
     def _push(self, ai_key: str, name: str, msg: str, ronde: int = 1):
-        if msg and self._session_id:
+        """Kirim pesan ke live feed (selalu) dan ke sesi diskusi (kalau ada)."""
+        if not msg:
+            return
+        # Live feed: selalu tampil di HTML
+        api_server.push_live_msg(ai_key, name, msg, self.symbol)
+        # Sesi diskusi: hanya saat loss debrief
+        if self._session_id:
             api_server.push_message(ai_key, name, msg, ronde, self._session_id, self.symbol)
 
     def _finish_session(self, conclusion: dict):
@@ -479,14 +485,11 @@ class BotCore:
         item = fvg_items[-1]
         logger.info(f"[FVG WAIT] FVG disentuh @ {item['level']:.4f} — panggil Senanan")
 
-        # Buat sesi diskusi — ini saat AI pertama kali aktif berdiskusi
-        if not self._session_id:
-            self._new_session(raw_data)
-            # Push pesan Hiura yang tertunda (dari saat BOS ditemukan)
-            pending = getattr(self, "_pending_hiura_msg", "") or self._hiura_data.get("chat_msg", "")
-            if pending:
-                self._push("ai1", "Hiura", pending, 1)
-                self._pending_hiura_msg = ""
+        # Pastikan pesan Hiura tertunda sudah di-push ke live feed
+        pending = getattr(self, "_pending_hiura_msg", "")
+        if pending:
+            api_server.push_live_msg("ai1", "Hiura", pending, self.symbol)
+            self._pending_hiura_msg = ""
 
         sh = self._hiura_data.get("sh_since_bos", 0)
         sl = self._hiura_data.get("sl_before_bos", 0)
