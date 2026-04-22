@@ -116,7 +116,9 @@ def get_live():
 
 
 # Pesan-pesan singkat yang masuk ke live feed tanpa sesi formal
-_live_feed: list = []
+# ── Sesi "main" — sesi permanen untuk semua monitoring bot ──────────
+_main_session_messages: list = []
+_main_session_conclusion: dict = {}
 
 # Status per-symbol dari bot (phase, harga, watchlist count)
 _bot_status: dict = {}  # key = symbol
@@ -132,22 +134,35 @@ def update_bot_status(symbol: str, phase: str, price: float, wl_count: int):
     }
 
 def push_live_msg(ai: str, nama: str, pesan: str, symbol: str = ""):
-    """Push pesan ke live feed tanpa membuat sesi baru."""
-    global _live_feed
-    _live_feed.append({
+    """Push pesan ke sesi 'main' — monitoring BOS, FVG, IDM, entry."""
+    global _main_session_messages
+    if not pesan:
+        return
+    _main_session_messages.append({
         "ai": ai, "nama": nama, "pesan": pesan,
         "symbol": symbol,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ronde": 0,
-        "side": "right" if ai == "yusuf" else "left",
+        "side": "right" if ai in ("yusuf","katyusha") else "left",
     })
-    _live_feed = _live_feed[-500:]  # max 500 pesan — cukup untuk satu trading session
+    _main_session_messages = _main_session_messages[-1000:]
 
 
 @app.route("/api/live/feed")
 def get_live_feed():
-    """Live feed: semua pesan singkat status AI (tidak perlu sesi)."""
-    return jsonify(_live_feed)
+    """Alias untuk kompatibilitas — return main session messages."""
+    return jsonify(_main_session_messages)
+
+
+@app.route("/api/main")
+def get_main_session():
+    """Sesi 'main' — semua aktivitas monitoring bot."""
+    return jsonify({
+        "id": "main",
+        "messages": _main_session_messages,
+        "conclusion": _main_session_conclusion,
+        "status": "active",
+    })
 
 
 @app.route("/api/bot_status")
