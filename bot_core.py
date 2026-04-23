@@ -30,6 +30,7 @@ from ai_analysts import (
     katyusha_review, katyusha_post_trade
 )
 from watchlist_engine import WatchlistEngine
+from state_manager import StateManager
 from rules_engine import RulesEngine
 from logic_engine import LogicEngine
 from prompt_engine import PromptEngine
@@ -89,7 +90,8 @@ class BotCore:
 
         # Components
         self.data     = DataProvider(symbol)
-        self.watchlist = WatchlistEngine()
+        self.watchlist  = WatchlistEngine()
+        self.state_mgr  = StateManager()
         self.rules    = RulesEngine()
         self.logic    = LogicEngine()
         self.prompts  = PromptEngine()
@@ -149,11 +151,15 @@ class BotCore:
         self._hiura_data    = {}
         self._senanan_data  = {}
         self._shina_data    = {}
+        self._last_bos_lvl  = 0.0
         self.watchlist.clear_untriggered()
         if self._session_id:
             self._finish_session({"consensus": reason or "reset"})
         self._session_id = ""
         self._pending_hiura_msg = ""
+        # Sync state
+        self.state_mgr.full_reset(reason)
+        self.state_mgr.update_phase("h1_scan")
 
     async def _wait_next_m5_close(self):
         """
@@ -178,7 +184,7 @@ class BotCore:
         return self.logic.get_context_for_ai()
 
     def _full_ctx(self, replay_text: str = "") -> dict:
-        """Return semua JSON config + replay state untuk AI."""
+        """Return semua JSON config + replay state + trading state untuk AI."""
         import json
         return {
             # Full JSON — tidak dipotong — semua AI harus lihat seluruh file
@@ -186,7 +192,10 @@ class BotCore:
             "logic":      json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "logic_raw":  {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},
             "prompts":    json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
-            "replay_text": replay_text,  # hasil replay engine untuk Hiura
+            "replay_text": replay_text,
+            # Problem 1: state persistent antar agent
+            "state":      self.state_mgr.to_context_str(),
+            "state_json": json.dumps(self.state_mgr.state, ensure_ascii=False, separators=(',',':')),
         }
 
     # ── Phase Handlers ───────────────────────────────────
@@ -364,6 +373,13 @@ class BotCore:
             sl       = result.get("sl_before_bos", 0)
             fvgs     = result.get("fvg_list", [])
 
+            # Problem 1: Update persistent state dari output Hiura
+            self.state_mgr.update_from_hiura({
+                "bos_found": True, "bos_level": bos_level, "bos_type": bos_type,
+                "sh_since_bos": sh, "sl_before_bos": sl, "fvg_list": fvgs,
+                "choch_warning": result.get("choch_warning", False),
+            })
+
             # Simpan msg Hiura — akan di-push ke sesi saat FVG disentuh
             self._pending_hiura_msg = msg
 
@@ -505,6 +521,9 @@ class BotCore:
         )
         self._senanan_data = result
         self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
+        # Problem 1: update state dari Senanan
+        self.state_mgr.update_from_senanan(result)
+        self.state_mgr.update_phase(self._phase)
 
         wl = result.get("watchlist", [])
         if wl and result.get("idm_found"):
@@ -584,6 +603,25 @@ class BotCore:
         )
         self._shina_data = result
         self._push("ai3", "Shina", result.get("chat_msg", ""), 3)
+        # Problem 1: update state dari Shina
+        self.state_mgr.update_from_shina(result)
+        self.state_mgr.update_phase(self._phase)
+
+        # Problem 4: enforce reset_count dari state
+        max_resets = 3
+        try:
+            import json as _j
+            logic_file = "data/logic_rules.json"
+            if __import__("os").path.exists(logic_file):
+                with open(logic_file) as _f:
+                    _lr = _j.load(_f)
+                max_resets = _lr.get("idm_reset", {}).get("max_reset", 3)
+        except Exception:
+            pass
+        if self.state_mgr.get("reset_count", default=0) >= max_resets:
+            logger.warning(f"[BOT] reset_count >= {max_resets} — force Hiura re-scan")
+            self.state_mgr.full_reset("max_reset_exceeded")
+            self._reset("max_reset_exceeded")
 
         decision = result.get("decision", "wait")
 
@@ -1061,11 +1099,17 @@ KEMAMPUANMU:
 
                 price = raw["price"]
 
-                # 2. Cek watchlist (Python cek harga, tidak ada analisis)
+                # 2. Expire watchlist kadaluarsa (Problem 5)
+                self.watchlist.expire_stale(self._phase)
+
+                # 3. Cek watchlist trigger — event-driven (Problem 2+6)
                 triggered = self.watchlist.check(price, self._prev_price)
                 if triggered:
                     for t in triggered:
-                        logger.info(f"[TRIGGER] {t['condition'].upper()} @ {t['level']:.2f} | {t['reason'][:60]}")
+                        logger.info(f"[TRIGGER] {t['condition'].upper()} @ {t['level']} | {t['reason'][:60]}")
+
+                # Sync phase ke state
+                self.state_mgr.update_phase(self._phase)
 
                 # 3. Katyusha review setiap 1 jam
                 import time as _time
@@ -1078,6 +1122,8 @@ KEMAMPUANMU:
                     bot_state = {
                         "phase":     self._phase,
                         "watchlist": self.watchlist.to_api_dict(),
+                        "state":     self.state_mgr.state,
+                        "state_ctx": self.state_mgr.to_context_str(),
                     }
                     k_result = katyusha_review(
                         self._katyusha_key, bot_state, raw,

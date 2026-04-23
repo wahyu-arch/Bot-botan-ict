@@ -171,6 +171,18 @@ def get_bot_status():
     return jsonify(list(_bot_status.values()))
 
 
+@app.route("/api/state")
+def get_state():
+    """Trading state persistent: BOS, IDM, MSS, reset_count, dll."""
+    import os, json
+    os.makedirs("data", exist_ok=True)
+    try:
+        with open("data/state.json") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception:
+        return '{"active_phase":"h1_scan","reset_count":0}', 200, {"Content-Type": "application/json"}
+
+
 @app.route("/api/prompts")
 @app.route("/api/prompts/")
 def get_prompts():

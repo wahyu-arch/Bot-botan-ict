@@ -45,16 +45,21 @@ def _load_json_files() -> dict:
 
 
 def _build_json_ctx(ctx: dict) -> str:
-    """Bangun konteks JSON lengkap untuk AI — rules, logic, dan prompts dari file JSON."""
+    """Bangun konteks lengkap untuk AI — rules, logic, prompts, dan trading state."""
     if not ctx:
         return ""
     parts = []
+    # State trading — paling penting, taruh di atas
+    if ctx.get("state"):
+        parts.append(f"{ctx['state']}")
     if ctx.get("rules"):
         parts.append(f"=== RULES (parameter trading) ===\n{ctx['rules']}")
     if ctx.get("logic"):
         parts.append(f"=== LOGIC (cara deteksi BOS/FVG/IDM) ===\n{ctx['logic']}")
     if ctx.get("prompts"):
         parts.append(f"=== PROMPTS (instruksi khusus) ===\n{ctx['prompts']}")
+    if ctx.get("replay_text"):
+        parts.append(f"=== REPLAY ENGINE ===\n{ctx['replay_text']}")
     return "\n\n".join(parts) if parts else ""
 
 
@@ -90,6 +95,26 @@ def _parse_json(raw: str) -> dict | list | None:
             return json.loads(text)
         except Exception:
             pass
+    return None
+
+
+def _call_with_retry(client, model: str, prompt: str,
+                     max_tokens: int = 800, temp: float = 0.2,
+                     max_retries: int = 2) -> dict | None:
+    """Panggil AI dan retry sampai dapat JSON valid. Max 2 retry."""
+    for attempt in range(max_retries + 1):
+        try:
+            raw = _call(client, model, prompt, max_tokens=max_tokens, temp=temp)
+            parsed = _parse_json(raw)
+            if parsed and isinstance(parsed, dict):
+                return parsed
+            if attempt < max_retries:
+                logger.warning(f"[RETRY {attempt+1}/{max_retries}] JSON tidak valid, coba lagi...")
+                # Tambahkan instruksi lebih keras di retry
+                prompt = prompt + "\n\n⚠️ PENTING: Balas HANYA dengan JSON murni, tidak ada teks lain."
+        except Exception as e:
+            logger.warning(f"[RETRY {attempt+1}] Error: {e}")
+    logger.error("[RETRY] Semua percobaan gagal — return None")
     return None
 
 
@@ -201,10 +226,9 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=800, temp=0.2)
-    parsed = _parse_json(raw)
+    parsed = _call_with_retry(client, model, prompt, max_tokens=800, temp=0.2)
     if not parsed:
-        logger.warning(f"[HIURA] Parse gagal: {raw[:100]}")
+        logger.warning("[HIURA] Parse gagal setelah retry")
         return {"bias": "neutral", "bos_found": False, "watchlist": [],
                 "fvg_list": [], "chat_msg": "", "confidence": 0}
 
@@ -297,10 +321,9 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=700, temp=0.2)
-    parsed = _parse_json(raw)
+    parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:
-        logger.warning(f"[SENANAN] Parse gagal: {raw[:100]}")
+        logger.warning("[SENANAN] Parse gagal setelah retry")
         return {"idm_found": False, "watchlist": [], "chat_msg": "", "confidence": 0}
 
     logger.info(f"[SENANAN] idm={parsed.get('idm_found')} watch={parsed.get('watch_level',0):.2f}")
@@ -374,10 +397,9 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=700, temp=0.2)
-    parsed = _parse_json(raw)
+    parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:
-        logger.warning(f"[SHINA] Parse gagal: {raw[:100]}")
+        logger.warning("[SHINA] Parse gagal setelah retry")
         return {"decision": "wait", "watchlist": [], "mss_found": False,
                 "chat_msg": "", "confidence": 0}
 
@@ -491,10 +513,9 @@ Balas JSON murni:
   "confidence": 0.0
 }}"""
 
-    raw = _call(client, model, prompt, max_tokens=500, temp=0.15)
-    parsed = _parse_json(raw)
+    parsed = _call_with_retry(client, model, prompt, max_tokens=600, temp=0.15)
     if not parsed:
-        logger.warning(f"[YUSUF] Parse gagal: {raw[:100]}")
+        logger.warning("[YUSUF] Parse gagal setelah retry")
         return {"decision": "skip", "chat_msg": "", "confidence": 0,
                 "entry": 0, "sl": 0, "tp": 0}
 

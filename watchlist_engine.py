@@ -69,10 +69,13 @@ class WatchlistEngine:
             json.dump(self.items, f, indent=2, ensure_ascii=False)
 
     def add(self, level: float, condition: str, reason: str, phase: str, session_ref: str,
-             symbol: str = "", assigned_to: str = "", action: str = "") -> dict:
+             symbol: str = "", assigned_to: str = "", action: str = "",
+             expires_on_phase_change: bool = True, ttl_hours: float = 24.0) -> dict:
         """Tambah item watchlist baru.
         assigned_to: AI yang dipanggil saat trigger (hiura/senanan/shina/yusuf/katyusha/auto)
         action: aksi spesifik saat trigger (re_analyze/check_bos/check_mss/entry/alert)
+        expires_on_phase_change: hapus otomatis kalau phase berubah
+        ttl_hours: hapus otomatis setelah N jam (0 = tidak expire)
         """
         item = {
             "id": f"wl_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:22]}",
@@ -85,14 +88,16 @@ class WatchlistEngine:
             "triggered_at": None,
             "session_ref": session_ref,
             "symbol": symbol,
-            "assigned_to": assigned_to,  # AI yang dipanggil saat trigger
-            "action": action,             # aksi spesifik
+            "assigned_to": assigned_to,
+            "action": action,
+            "expires_on_phase_change": expires_on_phase_change,
+            "ttl_hours": ttl_hours,
         }
         self.items.append(item)
         self._save()
         logger.info(
             f"[WATCHLIST] +Tambah | {condition.upper()} @ {level} | "
-            f"Phase: {phase} | Reason: {reason}"
+            f"Phase: {phase} | Reason: {reason} | TTL: {ttl_hours}h"
         )
         return item
 
@@ -113,6 +118,52 @@ class WatchlistEngine:
         self.items = [i for i in self.items if i.get("triggered")]
         self._save()
         logger.info(f"[WATCHLIST] Cleared {before - len(self.items)} untriggered items")
+
+    def expire_stale(self, current_phase: str):
+        """
+        Hapus watchlist yang:
+        1. expires_on_phase_change=True dan phase berubah
+        2. Sudah melewati ttl_hours sejak dibuat
+        """
+        now = datetime.now(timezone.utc)
+        before = len(self.items)
+        kept = []
+        for item in self.items:
+            if item.get("triggered"):
+                kept.append(item)
+                continue
+            # Cek TTL
+            ttl = item.get("ttl_hours", 24.0)
+            if ttl > 0:
+                try:
+                    created = datetime.fromisoformat(item["created_at"])
+                    age_hours = (now - created).total_seconds() / 3600
+                    if age_hours > ttl:
+                        logger.info(f"[WATCHLIST] Expired (TTL {ttl}h) | {item['condition']} @ {item['level']}")
+                        continue
+                except Exception:
+                    pass
+            # Cek phase change
+            if item.get("expires_on_phase_change") and item.get("phase") != current_phase:
+                # Hanya expire kalau phase item spesifik dan sudah tidak relevan
+                item_phase = item.get("phase", "")
+                # Fase yang sudah lewat: kalau sekarang fvg_wait, hapus h1_scan watchlist
+                phase_order = ["h1_scan","fvg_wait","bos_guard","entry_sniper"]
+                try:
+                    current_idx = phase_order.index(current_phase)
+                    item_idx    = phase_order.index(item_phase)
+                    if item_idx < current_idx - 1:  # lebih dari 1 fase ke belakang
+                        logger.info(f"[WATCHLIST] Expired (phase stale: {item_phase}→{current_phase}) | @ {item['level']}")
+                        continue
+                except ValueError:
+                    pass
+            kept.append(item)
+
+        removed = before - len(kept)
+        if removed:
+            self.items = kept
+            self._save()
+            logger.info(f"[WATCHLIST] expire_stale: hapus {removed} item kadaluarsa")
 
     def check(self, current_price: float, prev_price: float) -> list:
         """
