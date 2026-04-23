@@ -1,0 +1,24 @@
+{
+  "current_bos": {
+    "level": null, "direction": null, "candle_idx": null,
+    "sh_since_bos": null, "sl_before_bos": null, "confirmed_at": null
+  },
+  "current_fvg": {
+    "high": null, "low": null, "direction": null,
+    "touched": false, "touch_price": null
+  },
+  "fvg_list": [],
+  "idm_status": {
+    "confirmed": false, "level": null, "watch_level": null,
+    "candle_idx": null, "direction": null
+  },
+  "mss_status": {
+    "confirmed": false, "candle_idx": null,
+    "freeze_high": null, "freeze_low": null, "sl_level": null
+  },
+  "reset_count": 0,
+  "last_updated": null,
+  "active_phase": "h1_scan",
+  "last_agent": null,
+  "choch_warning": false
+}
