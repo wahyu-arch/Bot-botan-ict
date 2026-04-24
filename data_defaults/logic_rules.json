@@ -1,7 +1,7 @@
 {
-  "_version": 4,
+  "_version": 6,
   "_last_updated": "2026-04-21",
-  "_update_reason": "Flow diubah: BOS → FVG → IDM confirmed → Entry (MSS tidak wajib)",
+  "_update_reason": "Katyusha review: ",
   "_update_count": 0,
   "find_bos_h1": {
     "method": "swing_break",
@@ -22,9 +22,9 @@
     "filter_by_bos": true,
     "filled_condition": "price_closed_through_fvg",
     "wick_touch_valid": true,
-    "body_break_invalid": true,
+    "body_break_invalid": false,
     "min_gap_pct": 0.05,
-    "lookback": 20,
+    "lookback": 100,
     "role": "reference_zone_only",
     "comment": "FVG H1 digunakan sebagai referensi zona saja — bukan filter wajib entry. Entry tetap valid di luar FVG jika MSS terkonfirmasi."
   },
@@ -65,7 +65,7 @@
     "on_mss": "proceed_to_entry",
     "on_opposite_break": "reset_idm_hunt",
     "comment": "MSS M5 opsional — kalau ada lebih bagus (naikkan confidence), tapi entry tidak menunggu MSS. IDM confirmed sudah cukup.",
-    "required_for_entry": false
+    "required_for_entry": true
   },
   "entry": {
     "condition": "idm_confirmed",
@@ -75,20 +75,20 @@
     "order_type": "limit",
     "skip_if_outside_fvg": false,
     "comment": "Entry saat IDM M5 terkonfirmasi (disentuh). MSS TIDAK wajib. FVG hanya referensi. Flow: BOS H1 → FVG H1 disentuh → IDM M5 confirmed → Entry.",
-    "mss_required": false
+    "mss_required": true
   },
   "stop_loss": {
     "source": "mss_candle_extreme",
     "long_sl": "low_of_mss_candle",
     "short_sl": "high_of_mss_candle",
-    "buffer_pct": 0.0,
+    "buffer_pct": 0,
     "comment": "SL = low/high candle MSS."
   },
   "take_profit": {
     "target": "structure_high_low_since_bos",
     "long_tp": "highest_high_since_bos_h1",
     "short_tp": "lowest_low_since_bos_h1",
-    "min_rr": 2.0,
+    "min_rr": 2,
     "comment": "TP = high/low tertinggi sejak BOS H1. Min RR 2:1."
   },
   "bos_h1_invalidation": {
