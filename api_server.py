@@ -181,9 +181,16 @@ def _load_katyusha_state() -> bool:
     try:
         if _os.path.exists(_KATY_STATE_FILE):
             with open(_KATY_STATE_FILE) as f:
-                return bool(_json.load(f).get("enabled", True))
-    except Exception:
-        pass
+                val = bool(_json.load(f).get("enabled", True))
+            import logging as _log
+            _log.getLogger(__name__).info(f"[KATYUSHA] State loaded dari file: {'ON' if val else 'OFF'}")
+            return val
+        else:
+            import logging as _log
+            _log.getLogger(__name__).info("[KATYUSHA] State file belum ada — default ON")
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"[KATYUSHA] Gagal load state: {_e} — default ON")
     return True  # default ON
 
 def _save_katyusha_state(enabled: bool):
@@ -192,8 +199,11 @@ def _save_katyusha_state(enabled: bool):
         _os.makedirs("data", exist_ok=True)
         with open(_KATY_STATE_FILE, "w") as f:
             _json.dump({"enabled": enabled}, f)
-    except Exception:
-        pass
+        import logging as _log
+        _log.getLogger(__name__).info(f"[KATYUSHA] State disimpan: {'ON' if enabled else 'OFF'} → {_KATY_STATE_FILE}")
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"[KATYUSHA] Gagal simpan state: {_e}")
 
 # Load dari file saat startup
 _katyusha_enabled: bool = _load_katyusha_state()
