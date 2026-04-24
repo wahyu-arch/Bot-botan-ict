@@ -161,6 +161,90 @@ class BotCore:
         self.state_mgr.full_reset(reason)
         self.state_mgr.update_phase("h1_scan")
 
+    def _parse_update_hiura(self, result: dict):
+        """FIX 2+3: Parse UPDATE_HIURA dari output Hiura, auto-write prompts + inject watchlist."""
+        import re as _re
+        raw = result.get("_raw", "")
+        if not raw:
+            return
+        has_open  = "<UPDATE_HIURA>" in raw
+        has_close = "</UPDATE_HIURA>" in raw
+        if not (has_open and has_close):
+            if has_open:
+                logger.warning("[HIURA] UPDATE_HIURA tag tidak closed — skip")
+            return
+        m = _re.search(r"<UPDATE_HIURA>(.*?)</UPDATE_HIURA>", raw, _re.DOTALL)
+        if not m:
+            return
+        try:
+            data = json.loads(m.group(1).strip())
+        except Exception as e:
+            logger.warning(f"[HIURA] UPDATE_HIURA JSON invalid: {e}")
+            return
+
+        # Auto-write extra_instructions ke prompts.json
+        try:
+            fvg_zone = data.get("fvg_zone", {})
+            new_instr = (
+                f"Harga sekarang {data.get('current_price','')}. "
+                f"BOS {data.get('bos_direction','')} H1 aktif — level {data.get('bos_level','')}. "
+                f"SH aktif = {data.get('sh','')}. SL target = {data.get('sl','')}. "
+                f"FVG aktif: gap {fvg_zone.get('low','')}–{fvg_zone.get('high','')}, "
+                f"mid {fvg_zone.get('mid','')}. "
+                f"FVG in range: {data.get('fvg_in_range','')}."
+            )
+            self.prompts.prompts.setdefault("hiura", {})["extra_instructions"] = new_instr
+            self.prompts.save(self.prompts.prompts)
+            logger.info(f"[HIURA] UPDATE_HIURA: prompts.json updated")
+        except Exception as e:
+            logger.warning(f"[HIURA] Gagal update prompts: {e}")
+
+        # Auto-inject watchlist dari UPDATE_HIURA
+        wl_items = data.get("watchlist", [])
+        injected = 0
+        for item in wl_items:
+            lvl = float(item.get("level", 0))
+            if lvl <= 0:
+                continue
+            cond = item.get("condition", "touch")
+            # Cek duplikat
+            existing = [w for w in self.watchlist.get_active()
+                        if abs(w["level"] - lvl) < 1e-9 and w["condition"] == cond]
+            if existing:
+                continue
+            self.watchlist.add(
+                level=lvl,
+                condition=cond,
+                reason=item.get("reason", "UPDATE_HIURA inject"),
+                phase=item.get("phase", self._phase),
+                session_ref=self._session_id or "hiura",
+                symbol=self.symbol,
+                assigned_to=item.get("assigned_to", ""),
+                action=item.get("action", ""),
+                ttl_hours=item.get("ttl_hours", 24.0),
+            )
+            injected += 1
+        if injected:
+            logger.info(f"[HIURA] UPDATE_HIURA: {injected} watchlist item injected")
+
+        # Update state dari UPDATE_HIURA
+        if data.get("bos_level"):
+            self.state_mgr.update_from_hiura({
+                "bos_found": True,
+                "bos_level": data.get("bos_level"),
+                "bos_type": data.get("bos_direction",""),
+                "sh_since_bos": data.get("sh"),
+                "sl_before_bos": data.get("sl"),
+                "fvg_list": data.get("watchlist", []),
+            })
+
+        # FIX 4: Handoff — baca next_phase dari UPDATE_HIURA
+        next_phase = data.get("next_phase", "")
+        if next_phase and next_phase in ("fvg_wait","idm_hunt","bos_guard","entry_sniper"):
+            logger.info(f"[HIURA] next_phase dari UPDATE_HIURA: {next_phase}")
+            self._phase = next_phase
+            self.state_mgr.update_phase(next_phase)
+
     async def _wait_next_m5_close(self):
         """
         Tidur sampai tepat setelah candle M5 Bybit berikutnya close.
@@ -330,6 +414,8 @@ class BotCore:
                 prompt_ctx=self.prompts.build_context('hiura')
             )
             self._hiura_data = result
+            result["_raw"] = result.get("_raw", "")  # raw sudah di-set oleh ai_analysts
+            self._parse_update_hiura(result)  # FIX 2+3
             # Override dengan data dari replay (lebih akurat)
             bos_data = replay_event["data"].get("bos", {})
             self._hiura_data["bos_found"]     = True
@@ -521,8 +607,13 @@ class BotCore:
         )
         self._senanan_data = result
         self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
-        # Problem 1: update state dari Senanan
         self.state_mgr.update_from_senanan(result)
+
+        # FIX 4: baca next_phase dari output Senanan
+        next_p = result.get("next_phase", "")
+        if next_p and next_p in ("fvg_wait","idm_hunt","bos_guard","entry_sniper","h1_scan"):
+            logger.info(f"[SENANAN] next_phase: {next_p}")
+            self._phase = next_p
         self.state_mgr.update_phase(self._phase)
 
         wl = result.get("watchlist", [])
@@ -603,8 +694,35 @@ class BotCore:
         )
         self._shina_data = result
         self._push("ai3", "Shina", result.get("chat_msg", ""), 3)
-        # Problem 1: update state dari Shina
         self.state_mgr.update_from_shina(result)
+
+        # FIX 4+5: baca next_phase atau keyword RESET/ENTRY/WAIT dari Shina
+        shina_decision = result.get("decision", result.get("next_phase", ""))
+        raw_shina = result.get("_raw", "").upper()
+
+        if shina_decision in ("reset", "reset_idm") or "RESET" in raw_shina:
+            # FIX 5: auto-reset ke idm_hunt, panggil Senanan ulang
+            logger.info("[SHINA] RESET — balik ke idm_hunt, Senanan dipanggil ulang")
+            self.state_mgr.update_from_shina({"decision": "reset_idm"})
+            self._phase = "bos_guard"  # tetap bos_guard tapi clear IDM state
+            self._senanan_data = {}
+            self._shina_data = {}
+            self.watchlist.clear_untriggered()
+            # Set watchlist baru untuk trigger Senanan lagi
+            fvg_list = self._hiura_data.get("fvg_list", [])
+            for fvg in [f for f in fvg_list if not f.get("filled")][:2]:
+                lvl = fvg.get("mid") or (fvg["high"] + fvg["low"]) / 2
+                self.watchlist.add(level=lvl, condition="touch",
+                    reason="Re-hunt IDM setelah Shina reset",
+                    phase="fvg_wait", session_ref=self._session_id,
+                    symbol=self.symbol, assigned_to="senanan", action="re_analyze")
+        elif shina_decision in ("entry",) or "ENTRY" in raw_shina:
+            logger.info("[SHINA] ENTRY signal → entry_sniper")
+            next_p = "entry_sniper"
+            self._phase = next_p
+        elif result.get("next_phase","") in ("fvg_wait","idm_hunt","bos_guard","entry_sniper"):
+            self._phase = result["next_phase"]
+
         self.state_mgr.update_phase(self._phase)
 
         # Problem 4: enforce reset_count dari state
@@ -880,10 +998,17 @@ KEMAMPUANMU:
             answer = k_resp.json()["choices"][0]["message"]["content"].strip()
             logger.info(f"[CHAT] Katyusha: {answer[:100]}")
 
-            # Parse dan apply perubahan kalau ada blok APPLY_CHANGES
+            # FIX 1: Robust parser — harus ada KEDUA tag opening dan closing
             import re as _re
-            apply_match = _re.search(r"<APPLY_CHANGES>(.*?)</APPLY_CHANGES>", answer, _re.DOTALL)
+            has_open  = "<APPLY_CHANGES>" in answer
+            has_close = "</APPLY_CHANGES>" in answer
+            if has_open and not has_close:
+                logger.warning("[CHAT] APPLY_CHANGES tidak closed — skip blok, error tidak diinject ke chat")
+                answer += "\n[sistem: tag APPLY_CHANGES tidak lengkap, perubahan dibatalkan]"
+            apply_match = _re.search(r"<APPLY_CHANGES>(.*?)</APPLY_CHANGES>", answer, _re.DOTALL) if (has_open and has_close) else None
             clean_answer = _re.sub(r"<APPLY_CHANGES>.*?</APPLY_CHANGES>", "", answer, flags=_re.DOTALL).strip()
+            # Bersihkan error message internal agar tidak bocor ke chat user
+            clean_answer = _re.sub(r"\[sistem:.*?\]", "", clean_answer).strip()
             if apply_match:
                 raw_json = apply_match.group(1).strip()
                 logger.info(f"[CHAT] APPLY_CHANGES: {raw_json[:300]}")
@@ -1196,23 +1321,27 @@ KEMAMPUANMU:
                     elif ai_target == "yusuf" and action == "entry":
                         self._run_entry_sniper(raw)
 
-                # 4. Dispatch ke fase yang tepat
+                # FIX 4: Event-driven dispatch — setiap AI bisa set next_phase
+                # Map phase → handler (Katyusha spec: phase_to_agent pattern)
+                _phase_before = self._phase
                 if self._phase == "h1_scan":
-                    phase_before = self._phase
                     self._run_h1_scan(raw)
-                    # Kalau Hiura baru saja set fase ke fvg_wait, reset triggered
-                    # supaya watchlist lama yang kebetulan trigger tidak diteruskan
-                    if self._phase != phase_before:
-                        triggered = []
+                    if self._phase != _phase_before:
+                        triggered = []  # reset triggered saat fase baru
 
                 elif self._phase == "fvg_wait":
                     self._run_fvg_wait(raw, triggered)
 
-                elif self._phase == "bos_guard":
+                elif self._phase in ("bos_guard", "idm_hunt"):
                     self._run_bos_guard(raw, triggered)
 
                 elif self._phase == "entry_sniper":
                     self._run_entry_sniper(raw)
+
+                # Auto-handoff: kalau phase berubah setelah dispatch, log transisi
+                if self._phase != _phase_before:
+                    logger.info(f"[HANDOFF] {_phase_before} → {self._phase} (otomatis)")
+                    self.state_mgr.update_phase(self._phase)
 
                 # 4. Cek pesan user untuk Katyusha
                 self._handle_user_chat(raw)

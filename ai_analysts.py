@@ -101,16 +101,18 @@ def _parse_json(raw: str) -> dict | list | None:
 def _call_with_retry(client, model: str, prompt: str,
                      max_tokens: int = 800, temp: float = 0.2,
                      max_retries: int = 2) -> dict | None:
-    """Panggil AI dan retry sampai dapat JSON valid. Max 2 retry."""
+    """Panggil AI dan retry sampai dapat JSON valid. Return dict dengan _raw field."""
+    last_raw = ""
     for attempt in range(max_retries + 1):
         try:
             raw = _call(client, model, prompt, max_tokens=max_tokens, temp=temp)
+            last_raw = raw
             parsed = _parse_json(raw)
             if parsed and isinstance(parsed, dict):
+                parsed["_raw"] = raw  # simpan raw untuk tag parsing (UPDATE_HIURA dll)
                 return parsed
             if attempt < max_retries:
                 logger.warning(f"[RETRY {attempt+1}/{max_retries}] JSON tidak valid, coba lagi...")
-                # Tambahkan instruksi lebih keras di retry
                 prompt = prompt + "\n\n⚠️ PENTING: Balas HANYA dengan JSON murni, tidak ada teks lain."
         except Exception as e:
             logger.warning(f"[RETRY {attempt+1}] Error: {e}")

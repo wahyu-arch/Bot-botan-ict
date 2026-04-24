@@ -194,7 +194,7 @@ class WatchlistEngine:
             if fired:
                 item["triggered"] = True
                 item["triggered_at"] = datetime.now(timezone.utc).isoformat()
-                item["triggered_price"] = round(current_price, 2)
+                item["triggered_price"] = round(current_price, _smart_decimals(current_price))
                 triggered_now.append(item)
                 logger.info(
                     f"[WATCHLIST] 🔔 TRIGGER | {cond.upper()} @ {level} | "
