@@ -171,8 +171,32 @@ def get_bot_status():
     return jsonify(list(_bot_status.values()))
 
 
-# ── Katyusha toggle ───────────────────────────────────────
-_katyusha_enabled: bool = True  # default ON
+# ── Katyusha toggle — persistent ke file ─────────────────
+import os as _os, json as _json
+
+_KATY_STATE_FILE = "data/katyusha_state.json"
+
+def _load_katyusha_state() -> bool:
+    """Baca state dari file. Default ON kalau file belum ada."""
+    try:
+        if _os.path.exists(_KATY_STATE_FILE):
+            with open(_KATY_STATE_FILE) as f:
+                return bool(_json.load(f).get("enabled", True))
+    except Exception:
+        pass
+    return True  # default ON
+
+def _save_katyusha_state(enabled: bool):
+    """Simpan state ke file supaya persistent setelah restart."""
+    try:
+        _os.makedirs("data", exist_ok=True)
+        with open(_KATY_STATE_FILE, "w") as f:
+            _json.dump({"enabled": enabled}, f)
+    except Exception:
+        pass
+
+# Load dari file saat startup
+_katyusha_enabled: bool = _load_katyusha_state()
 
 def is_katyusha_enabled() -> bool:
     return _katyusha_enabled
@@ -184,7 +208,8 @@ def toggle_katyusha():
     if "enabled" in data:
         _katyusha_enabled = bool(data["enabled"])
     else:
-        _katyusha_enabled = not _katyusha_enabled  # flip
+        _katyusha_enabled = not _katyusha_enabled
+    _save_katyusha_state(_katyusha_enabled)  # simpan ke file
     return jsonify({"enabled": _katyusha_enabled})
 
 @app.route("/api/katyusha/status")
