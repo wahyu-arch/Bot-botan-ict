@@ -177,35 +177,50 @@ import os as _os, json as _json
 _KATY_STATE_FILE = "data/katyusha_state.json"
 
 def _load_katyusha_state() -> bool:
-    """Baca state dari file. Default ON kalau file belum ada."""
+    """
+    Baca state dari 3 sumber, urutan prioritas:
+    1. File data/katyusha_state.json (paling fresh — dari toggle user)
+    2. Env var KATYUSHA_ENABLED (fallback kalau file tidak ada)
+    3. Default: True (ON)
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
+    # Prioritas 1: file (paling fresh)
     try:
         if _os.path.exists(_KATY_STATE_FILE):
             with open(_KATY_STATE_FILE) as f:
                 val = bool(_json.load(f).get("enabled", True))
-            import logging as _log
-            _log.getLogger(__name__).info(f"[KATYUSHA] State loaded dari file: {'ON' if val else 'OFF'}")
+            _logger.info(f"[KATYUSHA] State loaded dari file: {'ON' if val else 'OFF'}")
             return val
-        else:
-            import logging as _log
-            _log.getLogger(__name__).info("[KATYUSHA] State file belum ada — default ON")
-    except Exception as _e:
-        import logging as _log
-        _log.getLogger(__name__).warning(f"[KATYUSHA] Gagal load state: {_e} — default ON")
-    return True  # default ON
+    except Exception as e:
+        _logger.warning(f"[KATYUSHA] Gagal baca file state: {e}")
+
+    # Prioritas 2: env var KATYUSHA_ENABLED
+    env_val = _os.environ.get("KATYUSHA_ENABLED", "").strip().lower()
+    if env_val in ("false", "0", "off", "no"):
+        _logger.info("[KATYUSHA] State dari env KATYUSHA_ENABLED=false → OFF")
+        return False
+    if env_val in ("true", "1", "on", "yes"):
+        _logger.info("[KATYUSHA] State dari env KATYUSHA_ENABLED=true → ON")
+        return True
+
+    _logger.info("[KATYUSHA] State file & env tidak ada — default ON")
+    return True
 
 def _save_katyusha_state(enabled: bool):
-    """Simpan state ke file supaya persistent setelah restart."""
+    """Simpan ke file. File ini persist kalau Railway volume aktif."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
     try:
         _os.makedirs("data", exist_ok=True)
         with open(_KATY_STATE_FILE, "w") as f:
             _json.dump({"enabled": enabled}, f)
-        import logging as _log
-        _log.getLogger(__name__).info(f"[KATYUSHA] State disimpan: {'ON' if enabled else 'OFF'} → {_KATY_STATE_FILE}")
-    except Exception as _e:
-        import logging as _log
-        _log.getLogger(__name__).warning(f"[KATYUSHA] Gagal simpan state: {_e}")
+        _logger.info(f"[KATYUSHA] State disimpan: {'ON' if enabled else 'OFF'} → {_KATY_STATE_FILE}")
+    except Exception as e:
+        _logger.warning(f"[KATYUSHA] Gagal simpan state ke file: {e} — state hanya di memory")
 
-# Load dari file saat startup
+# Load saat startup
 _katyusha_enabled: bool = _load_katyusha_state()
 
 def is_katyusha_enabled() -> bool:
