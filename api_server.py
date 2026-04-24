@@ -171,6 +171,27 @@ def get_bot_status():
     return jsonify(list(_bot_status.values()))
 
 
+# ── Katyusha toggle ───────────────────────────────────────
+_katyusha_enabled: bool = True  # default ON
+
+def is_katyusha_enabled() -> bool:
+    return _katyusha_enabled
+
+@app.route("/api/katyusha/toggle", methods=["POST"])
+def toggle_katyusha():
+    global _katyusha_enabled
+    data = request.get_json(silent=True) or {}
+    if "enabled" in data:
+        _katyusha_enabled = bool(data["enabled"])
+    else:
+        _katyusha_enabled = not _katyusha_enabled  # flip
+    return jsonify({"enabled": _katyusha_enabled})
+
+@app.route("/api/katyusha/status")
+def katyusha_status():
+    return jsonify({"enabled": _katyusha_enabled})
+
+
 @app.route("/api/state")
 def get_state():
     """Trading state persistent: BOS, IDM, MSS, reset_count, dll."""

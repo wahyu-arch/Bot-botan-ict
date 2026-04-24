@@ -1,178 +1,118 @@
-# 🤖 ICT Trading Bot — Groq AI + Bybit + Memory Self-Iteration
+# 🤖 Bot Botan ICT — Multi-AI Trading System
 
-Bot trading otomatis untuk Bybit Linear Perpetual menggunakan:
-- **Groq AI (LLaMA 3.3 70B)** — otak analisis & keputusan
-- **Strategi ICT**: M15 arah market, M1 konfirmasi entry
-- **Risk 1% per trade** — fixed, dikalkulasi otomatis dari balance
-- **Memory Self-Iteration** — AI belajar dari kesalahan sendiri
-- **Railway-ready** — deploy satu klik
+Bot trading otomatis Bybit Futures menggunakan chain analisis 5 AI dengan arsitektur **event-driven + persistent state**.
 
 ---
 
-## 🧠 Alur Self-Iteration
+## 🧠 Arsitektur AI
 
 ```
-M15 + M1 Candles (Bybit Klines)
-        ↓
-ICT Analyzer  →  OB, FVG, BOS, MSS, Liquidity
-        ↓
-Groq AI  ←  memory errors dari trade sebelumnya
-        ↓
-Validasi: SL/TP valid? RR ≥ 1.5? Confidence ≥ 60%?
-     ↙ invalid            ↘ valid
-Log error          Kalkulasi qty (1% risk)
-Iterasi ulang            ↓
-(max 3x)          Kirim ke Bybit API
-                         ↓
-                  Monitor → SL/TP hit
-                         ↓
-                  Jika LOSS → AI introspeksi
-                         ↓
-                  Simpan lesson → dipakai besok
+Hiura (H1 analyst)
+  ↓ force_phase + notify
+Senanan (IDM M5 hunter)
+  ↓ force_phase + notify
+Shina (BOS/MSS M5 guard)
+  ↓ force_phase + notify
+Yusuf (Entry sniper)
+  ↓ place_order
+Katyusha (Supervisor — opsional, bisa dimatikan)
 ```
+
+Setiap AI punya **authority** berbeda:
+- **Hiura** → force fase, tambah watchlist, notify Senanan
+- **Senanan** → force fase, tambah watchlist, notify Shina
+- **Shina** → force semua fase, notify Yusuf / reset ke Senanan
+- **Yusuf** → eksekusi order, reset ke h1_scan setelah entry
+- **Katyusha** → authority penuh, bisa on/off via tombol di UI
+
+Chain berjalan **mandiri tanpa Katyusha** — bisa dimatikan di panel chat.
 
 ---
 
-## 📊 Strategi ICT
+## 📊 Fase Trading
 
-| Konsep | TF | Fungsi |
-|--------|-----|--------|
-| Market Structure HH/HL/LH/LL | M15 | Bias bullish/bearish |
-| Order Block (OB) | M15 | Area supply/demand |
-| Fair Value Gap (FVG) | M15+M1 | Imbalance, magnet harga |
-| Break of Structure (BOS) | M15 | Konfirmasi trend |
-| Market Structure Shift (MSS) | M1 | Trigger entry |
-| Liquidity Pools | M15 | Target TP |
+```
+h1_scan → fvg_wait → idm_hunt → bos_guard → entry_sniper
+```
 
-**Entry hanya jika minimum 2 konfluensi ICT terpenuhi.**
+| Fase | AI | Trigger |
+|---|---|---|
+| `h1_scan` | Hiura | Setiap M5 close |
+| `fvg_wait` | Hiura | BOS H1 ditemukan |
+| `idm_hunt` | Senanan | Harga masuk zona FVG |
+| `bos_guard` | Shina | IDM M5 disentuh |
+| `entry_sniper` | Yusuf | MSS M5 confirmed |
 
 ---
 
-## 💰 Risk Management (1% Fixed)
-
-```
-Qty = (Balance × 1%) / SL_distance_USD
-
-Contoh BTCUSDT:
-  Balance    = $10,000
-  Risk 1%    = $100
-  Entry      = $65,000
-  SL         = $64,350  → SL distance = $650
-  Qty        = $100 / $650 = 0.154 BTC
-  Max loss   = $100 (persis 1% balance)
-```
-
-Balance di-sync live dari Bybit sebelum tiap kalkulasi.
-
----
-
-## 🚀 Deploy ke Railway
-
-### 1. Siapkan Bybit API Key
-
-**Testnet (recommended untuk mulai):**
-- Daftar di [testnet.bybit.com](https://testnet.bybit.com)
-- API → Create Key → centang "Contract" (read + write)
-
-**Mainnet:**
-- [bybit.com](https://www.bybit.com) → API Management
-- Izinkan: Contract Orders (bukan withdrawal!)
-- Whitelist IP Railway jika perlu
-
-### 2. Siapkan Groq API Key
-- Daftar gratis di [console.groq.com](https://console.groq.com)
-- Create API Key
-
-### 3. Deploy
+## ⚙️ Deploy ke Railway / Render / Fly.io
 
 ```bash
-# Push ke GitHub dulu
-git init && git add . && git commit -m "init"
-git push origin main
+# Clone repo
+git clone <repo_url>
+cd bot-botan-ict
 
-# Lalu hubungkan repo di railway.app
-# Atau via CLI:
-npm i -g @railway/cli
-railway login
-railway init
+# Set environment variables (lihat .env.example)
+# Deploy
 railway up
 ```
 
-### 4. Set Environment Variables di Railway
-
-```
-GROQ_API_KEY        = gsk_xxxxxxxxxxxx
-BYBIT_API_KEY       = xxxxxxxxxxxxxxxxxx
-BYBIT_API_SECRET    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-BYBIT_TESTNET       = true
-TRADING_SYMBOL      = BTCUSDT
-PAPER_TRADING       = true
-DATA_SOURCE         = bybit
-ACCOUNT_BALANCE     = 10000
-MAX_QTY             = 0.5
-SCAN_INTERVAL_SECONDS = 60
-MAX_AI_ITERATIONS   = 3
-```
+### Pindah dari Railway ke platform lain:
+1. Copy semua env variables dari Railway Dashboard → Variables
+2. Pastikan `data/` folder di-mount sebagai persistent volume
+   - Railway: sudah otomatis via volume mount
+   - Render: tambah Disk di Settings → mount path `/app/data`
+   - Fly.io: `fly volumes create data --size 1`
+3. Port yang diexpose: `8080` (Flask API + HTML dashboard)
 
 ---
 
-## 📁 Struktur Project
+## 🔑 Environment Variables
 
-```
-trading-bot/
-├── main.py                 ← Entry point
-├── railway.toml            ← Config Railway
-├── nixpacks.toml           ← Build Python 3.11
-├── requirements.txt        ← groq, pybit, requests
-├── .env.example            ← Template env vars
-├── src/
-│   ├── trading_bot.py      ← Orchestrator utama
-│   ├── ict_analyzer.py     ← OB, FVG, BOS, MSS detection
-│   ├── memory_system.py    ← Persistent memory + lessons
-│   ├── market_data.py      ← Bybit klines fetcher
-│   ├── risk_manager.py     ← Qty calc (1% risk fixed)
-│   └── trade_executor.py   ← Bybit order + paper mode
-├── data/
-│   ├── trade_memory.json   ← Memory persisten
-│   └── paper_trades.json   ← Riwayat paper trade
-└── logs/
-    └── trading_bot.log
-```
+Lihat `.env.example` untuk daftar lengkap. Yang wajib:
+
+| Variable | Keterangan |
+|---|---|
+| `GROQ_API_KEY` | API key Groq (Hiura, Senanan, Shina, Yusuf) |
+| `BYBIT_API_KEY` | Bybit API key |
+| `BYBIT_API_SECRET` | Bybit API secret |
+| `TRADING_SYMBOL` | Symbol trading (contoh: `BTCUSDT`) |
+| `PAPER_TRADING` | `true` = paper, `false` = live |
+| `OPENROUTER_API_KEY` | Opsional — untuk Katyusha (Claude Sonnet) |
 
 ---
 
-## 📋 Contoh Log Normal
+## 📁 File JSON Penting
 
-```
-09:30:01 | INFO | ══════════════════════════════════════
-09:30:01 | INFO | ICT Trading Bot dengan Groq AI + Memory System
-09:30:01 | INFO | Symbol: BTCUSDT | Mode: PAPER
-09:30:02 | INFO | Memulai siklus analisis
-09:30:03 | INFO | ICT preliminary: bias=bearish | OBs=2 | FVGs=3
-09:30:04 | INFO | Mengirim ke Groq AI (iterasi 1)...
-09:30:05 | INFO | Sinyal valid iterasi 1: sell
-09:30:05 | INFO | Risk Calc | Balance: $10000 | Risk: 1% = $100 | SL dist: $420 | Qty: 0.238 BTC
-09:30:05 | INFO | PAPER #A3F1: SELL 0.238 @ 65200 | SL: 65620 | TP: 63960 | Max loss: $99.96
-09:30:06 | INFO | Stats | Total: 15 | Win: 9 | Loss: 4 | WR: 60% | Errors: 6
-```
+Semua di folder `data/` — bisa diedit langsung atau via Katyusha:
 
-### Contoh Self-Iteration:
-```
-09:45:04 | WARNING | Validasi gagal (iterasi 1): RR terlalu rendah: 1.2 (min 1.5:1)
-09:45:05 | INFO    | Mengirim ke Groq AI (iterasi 2)...
-09:45:06 | INFO    | Sinyal valid iterasi 2: sell
-```
-
-### Contoh Post-Trade Learning:
-```
-10:12:33 | INFO | Trade closed: LOSS | PnL: -$99.80
-10:12:34 | INFO | Post-trade lesson: "Entry terlalu terburu-buru sebelum MSS M1 konfirmasi"
-10:12:34 | INFO | Lesson disimpan ke memory — akan digunakan di siklus berikutnya
-```
+| File | Fungsi |
+|---|---|
+| `rules.json` | Parameter trading (min_confidence, min_rr, dll) |
+| `logic_rules.json` | Cara deteksi BOS/FVG/IDM/MSS |
+| `prompts.json` | Instruksi dan sistem respons per AI |
+| `state.json` | State trading persistent (BOS, IDM, MSS, fase) |
+| `watchlist.json` | Level harga yang dipantau |
 
 ---
 
-## ⚠️ Disclaimer
+## 🖥️ Dashboard
 
-Selalu mulai dengan `PAPER_TRADING=true` dan `BYBIT_TESTNET=true`.
-Bot ini untuk edukasi. Trading crypto memiliki risiko tinggi kehilangan modal.
+Buka `https://<railway-url>/` untuk:
+- Live chat dengan Katyusha
+- Toggle Katyusha on/off
+- Lihat watchlist aktif + fase per symbol
+- History sesi diskusi (loss debrief)
+- Tab: Rules, Logic, Prompts, State, Balance
+
+---
+
+## 🔄 Cara Ganti Platform
+
+1. Export env variables dari Railway
+2. Pastikan file `data/*.json` di-download/backup
+3. Deploy ke platform baru
+4. Upload file `data/*.json` ke persistent storage
+5. Set env variables
+
+File `data/state.json` menyimpan state trading — kalau hilang, bot mulai fresh dari `h1_scan`.

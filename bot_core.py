@@ -39,6 +39,7 @@ from memory_system import MemorySystem
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 import api_server
+from api_server import is_katyusha_enabled
 
 logger = logging.getLogger(__name__)
 os.makedirs("logs", exist_ok=True)
@@ -1368,6 +1369,7 @@ KEMAMPUANMU:
                 import time as _time
                 now_ts = _time.time()
                 if (self._katyusha_key and
+                        is_katyusha_enabled() and
                         now_ts - self._last_katyusha_ts >= self._katyusha_interval and
                         self._phase != "h1_scan"):
                     self._last_katyusha_ts = now_ts
