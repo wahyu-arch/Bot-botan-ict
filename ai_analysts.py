@@ -317,11 +317,19 @@ Balas JSON murni:
   "watch_condition": "touch",
   "watch_reason": "low/high candle A IDM @ X.XX",
   "watchlist": [
-    {{"level": 0.0, "condition": "touch", "reason": "IDM watch level"}}
+    {{"level": 0.0, "condition": "touch", "reason": "IDM watch level", "assigned_to": "shina", "action": "check_mss"}}
   ],
+  "actions": [
+    {{"type": "force_phase", "phase": "bos_guard"}},
+    {{"type": "add_watchlist", "level": 0.0, "condition": "break_above", "reason": "freeze high → Shina cek MSS", "assigned_to": "shina", "action": "check_mss"}},
+    {{"type": "notify", "to": "shina", "message": "IDM confirmed, freeze range siap dicek"}}
+  ],
+  "next_phase": "bos_guard",
   "chat_msg": "pesan ke grup WA max 2 kalimat",
   "confidence": 0.0
-}}"""
+}}
+
+AUTHORITY SENANAN: force_phase(bos_guard/fvg_wait/h1_scan), add_watchlist(→shina/hiura), notify"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:
@@ -393,11 +401,20 @@ Balas JSON murni:
   "mss_candle_low": 0.0,
   "decision": "entry|wait|reset_idm",
   "watchlist": [
-    {{"level": 0.0, "condition": "break_above|break_below|touch", "reason": "freeze high/low"}}
+    {{"level": 0.0, "condition": "break_above|break_below|touch", "reason": "freeze high/low", "assigned_to": "yusuf", "action": "entry"}}
   ],
+  "actions": [
+    {{"type": "force_phase", "phase": "entry_sniper"}},
+    {{"type": "add_watchlist", "level": 0.0, "condition": "touch", "reason": "MSS → Yusuf entry", "assigned_to": "yusuf", "action": "entry"}},
+    {{"type": "notify", "to": "yusuf", "message": "MSS confirmed, entry siap"}},
+    {{"type": "force_phase", "phase": "idm_hunt"}}
+  ],
+  "next_phase": "entry_sniper",
   "chat_msg": "pesan ke grup WA max 2 kalimat",
   "confidence": 0.0
-}}"""
+}}
+
+AUTHORITY SHINA: force_phase(entry_sniper/bos_guard/idm_hunt/fvg_wait), add_watchlist(→yusuf), notify(→yusuf)"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:

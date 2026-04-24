@@ -245,6 +245,113 @@ class BotCore:
             self._phase = next_phase
             self.state_mgr.update_phase(next_phase)
 
+    # ── Allowed actions per AI (Katyusha spec) ──────────────
+    _AI_AUTHORITY = {
+        "hiura":    {"force_phase": {"fvg_wait","idm_hunt","h1_scan"},
+                     "add_watchlist": True, "notify": True},
+        "senanan":  {"force_phase": {"bos_guard","fvg_wait","h1_scan","idm_hunt"},
+                     "add_watchlist": True, "notify": True},
+        "shina":    {"force_phase": {"entry_sniper","bos_guard","idm_hunt","fvg_wait","h1_scan"},
+                     "add_watchlist": True, "notify": True},
+        "yusuf":    {"force_phase": {"h1_scan"},          # Yusuf bisa reset ke h1_scan setelah entry
+                     "add_watchlist": True, "notify": True},
+        "katyusha": {"force_phase": {"h1_scan","fvg_wait","idm_hunt","bos_guard","entry_sniper"},
+                     "add_watchlist": True, "notify": True},
+    }
+
+    def _execute_actions(self, ai_name: str, actions: list, raw_data: dict):
+        """
+        ActionExecutor — baca field `actions` dari response AI dan eksekusi.
+        Setiap AI punya authority sesuai _AI_AUTHORITY.
+        """
+        if not actions or not isinstance(actions, list):
+            return
+
+        authority = self._AI_AUTHORITY.get(ai_name.lower(), {})
+
+        for act in actions:
+            atype = act.get("type", "")
+
+            # ── force_phase ────────────────────────────────────────
+            if atype == "force_phase":
+                phase = act.get("phase", "")
+                allowed = authority.get("force_phase", set())
+                if phase in allowed:
+                    old = self._phase
+                    self._phase = phase
+                    self.state_mgr.update_phase(phase)
+                    logger.info(f"[ACTION] {ai_name} force_phase: {old} → {phase}")
+                    # Reset state yang relevan saat phase berubah
+                    if phase in ("h1_scan",):
+                        self._reset(f"{ai_name}_forced_h1scan")
+                        return  # _reset sudah handle sisanya
+                    elif phase in ("idm_hunt", "fvg_wait"):
+                        self._senanan_data = {}
+                        self._shina_data   = {}
+                        self.watchlist.clear_untriggered()
+                    api_server.push_live_msg(ai_name, ai_name.capitalize(),
+                        f"⚡ Phase → {phase} (by {ai_name})", self.symbol)
+                else:
+                    logger.warning(f"[ACTION] {ai_name} tidak punya authority force_phase={phase}")
+
+            # ── add_watchlist ───────────────────────────────────────
+            elif atype == "add_watchlist":
+                if not authority.get("add_watchlist"):
+                    continue
+                lvl = float(act.get("level", 0))
+                if lvl <= 0:
+                    logger.warning(f"[ACTION] {ai_name} add_watchlist level=0 — skip")
+                    continue
+                cond        = act.get("condition", "touch")
+                assigned_to = act.get("assigned_to", "")
+                action_tag  = act.get("action", "")
+                reason      = act.get("reason", f"{ai_name} watchlist")
+                phase_tag   = act.get("phase", self._phase)
+                ttl         = float(act.get("ttl_hours", 24.0))
+
+                # Cek duplikat
+                existing = [w for w in self.watchlist.get_active()
+                            if abs(w["level"] - lvl) < 1e-9 and w["condition"] == cond]
+                if existing:
+                    logger.debug(f"[ACTION] Watchlist duplikat @ {lvl} — skip")
+                    continue
+
+                self.watchlist.add(
+                    level=lvl, condition=cond, reason=reason,
+                    phase=phase_tag, session_ref=self._session_id or ai_name,
+                    symbol=self.symbol, assigned_to=assigned_to,
+                    action=action_tag, ttl_hours=ttl,
+                )
+                logger.info(f"[ACTION] {ai_name} add_watchlist: {cond} @ {lvl} → {assigned_to or 'unassigned'}")
+
+            # ── notify ──────────────────────────────────────────────
+            elif atype == "notify":
+                if not authority.get("notify"):
+                    continue
+                to_ai   = act.get("to", "")
+                message = act.get("message", "")
+                if not message:
+                    continue
+                # Inject notifikasi ke context AI yang dituju via pending_messages
+                if not hasattr(self, "_pending_notifications"):
+                    self._pending_notifications = {}
+                self._pending_notifications.setdefault(to_ai.lower(), []).append(
+                    f"[Dari {ai_name}]: {message}"
+                )
+                logger.info(f"[ACTION] {ai_name} → notify {to_ai}: {message[:60]}")
+                api_server.push_live_msg(ai_name, ai_name.capitalize(),
+                    f"📨 → {to_ai.capitalize()}: {message[:80]}", self.symbol)
+
+            else:
+                logger.debug(f"[ACTION] Unknown action type: {atype}")
+
+    def _get_notifications(self, ai_name: str) -> str:
+        """Ambil notifikasi pending untuk AI ini, lalu hapus."""
+        if not hasattr(self, "_pending_notifications"):
+            return ""
+        msgs = self._pending_notifications.pop(ai_name.lower(), [])
+        return "\n".join(msgs) if msgs else ""
+
     async def _wait_next_m5_close(self):
         """
         Tidur sampai tepat setelah candle M5 Bybit berikutnya close.
@@ -465,6 +572,14 @@ class BotCore:
                 "sh_since_bos": sh, "sl_before_bos": sl, "fvg_list": fvgs,
                 "choch_warning": result.get("choch_warning", False),
             })
+            # Execute actions dari Hiura
+            self._execute_actions("hiura", result.get("actions", []), raw_data)
+            # Auto-inject watchlist dari field watchlist (kompatibilitas)
+            for wl in result.get("watchlist", []):
+                if float(wl.get("level", 0)) > 0:
+                    self._execute_actions("hiura", [{
+                        "type": "add_watchlist", **wl
+                    }], raw_data)
 
             # Simpan msg Hiura — akan di-push ke sesi saat FVG disentuh
             self._pending_hiura_msg = msg
@@ -599,6 +714,12 @@ class BotCore:
         bias = self._hiura_data.get("bias", "neutral")
         m5_dir = "bearish" if bias == "bullish" else "bullish"
 
+        # Inject notifikasi dari Hiura atau AI lain (notify system)
+        sen_notif = self._get_notifications("senanan")
+        if sen_notif:
+            logger.info(f"[SENANAN] Notifikasi masuk: {sen_notif[:100]}")
+            api_server.push_live_msg("ai2", "Senanan", f"📨 {sen_notif[:100]}", self.symbol)
+
         result = senanan_idm_hunt(
             self.clients[1], self.model_ai2,
             raw_data, sh, sl, m5_dir, bias,
@@ -608,6 +729,8 @@ class BotCore:
         self._senanan_data = result
         self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
         self.state_mgr.update_from_senanan(result)
+        # Execute actions dari Senanan
+        self._execute_actions("senanan", result.get("actions", []), raw_data)
 
         # FIX 4: baca next_phase dari output Senanan
         next_p = result.get("next_phase", "")
@@ -681,6 +804,9 @@ class BotCore:
 
         item = triggered_items[-1]
         logger.info(f"[BOS GUARD] IDM M5 disentuh @ {item['level']:.2f} — panggil Shina")
+        shina_notif = self._get_notifications("shina")
+        if shina_notif:
+            logger.info(f"[SHINA] Notifikasi masuk: {shina_notif[:100]}")
 
         bias = self._hiura_data.get("bias", "neutral")
         sh   = self._hiura_data.get("sh_since_bos", 0)
@@ -695,6 +821,8 @@ class BotCore:
         self._shina_data = result
         self._push("ai3", "Shina", result.get("chat_msg", ""), 3)
         self.state_mgr.update_from_shina(result)
+        # Execute actions dari Shina
+        self._execute_actions("shina", result.get("actions", []), raw_data)
 
         # FIX 4+5: baca next_phase atau keyword RESET/ENTRY/WAIT dari Shina
         shina_decision = result.get("decision", result.get("next_phase", ""))
