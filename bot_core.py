@@ -222,7 +222,7 @@ class BotCore:
         self._push(f"ai_{ai_key}", ai_name.capitalize(),
                    f"💭 [{ai_name.capitalize()}] updated own memory: {new_instr[:80]}...", 0)
 
-    def _parse_update_hiura(self, result: dict):    def _parse_update_hiura(self, result: dict):
+    def _parse_update_hiura(self, result: dict):
         """FIX 2+3: Parse UPDATE_HIURA dari output Hiura, auto-write prompts + inject watchlist."""
         import re as _re
         raw = result.get("_raw", "")
