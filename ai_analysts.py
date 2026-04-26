@@ -45,21 +45,40 @@ def _load_json_files() -> dict:
 
 
 def _build_json_ctx(ctx: dict) -> str:
-    """Bangun konteks lengkap untuk AI — rules, logic, prompts, dan trading state."""
+    """Bangun konteks lengkap untuk AI — rules, logic, prompts, state antar AI, dan reset_count."""
     if not ctx:
         return ""
     parts = []
-    # State trading — paling penting, taruh di atas
+
+    # Trading state — taruh di atas agar AI selalu lihat duluan
     if ctx.get("state"):
-        parts.append(f"{ctx['state']}")
+        parts.append(ctx["state"])
+
+    # State dari AI lain (Python Fix 2: context persistence antar AI)
+    ai_states = []
+    if ctx.get("hiura_data") and ctx["hiura_data"] != "{}":
+        ai_states.append(f"Hiura last output: {ctx['hiura_data']}")
+    if ctx.get("senanan_data") and ctx["senanan_data"] != "{}":
+        ai_states.append(f"Senanan last output: {ctx['senanan_data']}")
+    if ctx.get("shina_data") and ctx["shina_data"] != "{}":
+        ai_states.append(f"Shina last output: {ctx['shina_data']}")
+    if ai_states:
+        parts.append("=== STATE DARI AI LAIN ===\n" + "\n".join(ai_states))
+
+    # Reset count dan stuck info
+    rc = ctx.get("reset_count", 0)
+    cyc = ctx.get("cycles_in_phase", 0)
+    if rc > 0 or cyc > 3:
+        parts.append(f"⚠️ reset_count={rc} | cycles_in_phase={cyc}")
+
     if ctx.get("rules"):
-        parts.append(f"=== RULES (parameter trading) ===\n{ctx['rules']}")
+        parts.append(f"=== RULES ===\n{ctx['rules']}")
     if ctx.get("logic"):
-        parts.append(f"=== LOGIC (cara deteksi BOS/FVG/IDM) ===\n{ctx['logic']}")
+        parts.append(f"=== LOGIC ===\n{ctx['logic']}")
     if ctx.get("prompts"):
-        parts.append(f"=== PROMPTS (instruksi khusus) ===\n{ctx['prompts']}")
+        parts.append(f"=== PROMPTS ===\n{ctx['prompts']}")
     if ctx.get("replay_text"):
-        parts.append(f"=== REPLAY ENGINE ===\n{ctx['replay_text']}")
+        parts.append(f"=== REPLAY ===\n{ctx['replay_text']}")
     return "\n\n".join(parts) if parts else ""
 
 

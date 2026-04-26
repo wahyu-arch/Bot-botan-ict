@@ -115,14 +115,25 @@ class BotCore:
         # State
         self._phase         = "h1_scan"
         self._session_id    = ""
-        self._pending_hiura_msg = ""  # pesan Hiura disimpan, di-push saat sesi dibuat
+        self._pending_hiura_msg = ""
         self._prev_price    = 0.0
-        self._last_bos_lvl  = 0.0  # hindari sesi duplikat BOS sama
+        self._last_bos_lvl  = 0.0
+        self._cycles_in_phase = 0        # Python Fix 3: stuck detection
+        self._last_phase_change = ""     # timestamp phase change terakhir
+        self._pending_notifications: dict = {}
 
         # Data dari tiap AI (disimpan antar fase)
         self._hiura_data  : dict = {}
         self._senanan_data: dict = {}
         self._shina_data  : dict = {}
+
+        # Python Fix 3: max cycles per phase sebelum auto-reset
+        self._MAX_CYCLES_PER_PHASE = {
+            "fvg_wait":      10,
+            "idm_hunt":      15,
+            "bos_guard":     10,
+            "entry_sniper":  5,
+        }
 
         logger.info(f"BotCore ready | {symbol} | paper={paper} | symbols={self.symbols}")
         logger.info(f"Models: main={self.model_main} | ai1={self.model_ai1} | "
@@ -434,21 +445,121 @@ class BotCore:
 
     def _logic_ctx(self) -> str:
         return self.logic.get_context_for_ai()
+    def _logic_ctx(self) -> str:
+        return self.logic.get_context_for_ai()
 
-    def _full_ctx(self, replay_text: str = "") -> dict:
-        """Return semua JSON config + replay state + trading state untuk AI."""
+    # ── Python Fixes dari Katyusha ────────────────────────
+
+    @staticmethod
+    def validate_rr(entry: float, sl: float, tp: float,
+                    min_rr: float = 2.0) -> tuple[bool, float]:
+        """Python Fix 6: Validasi RR di Python, bukan hanya di AI."""
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk == 0:
+            return False, 0.0
+        rr = reward / risk
+        return rr >= min_rr, round(rr, 2)
+
+    @staticmethod
+    def is_ranging(h1_candles: list, lookback: int = 20,
+                   threshold_pct: float = 1.5) -> bool:
+        """Python Fix 9: Deteksi ranging market dari candle H1."""
+        if len(h1_candles) < lookback:
+            return False
+        recent = h1_candles[-lookback:]
+        highs  = [c["h"] for c in recent]
+        lows   = [c["l"] for c in recent]
+        if not lows or min(lows) == 0:
+            return False
+        range_pct = (max(highs) - min(lows)) / min(lows) * 100
+        return range_pct < threshold_pct
+
+    def _set_phase(self, new_phase: str, reason: str = "", by: str = "python"):
+        """Python Fix 10: Phase transition dengan log lengkap."""
+        if new_phase == self._phase:
+            return
+        old_phase = self._phase
+        self._phase = new_phase
+        self._cycles_in_phase = 0
+        self._last_phase_change = datetime.now(timezone.utc).isoformat()
+        self.state_mgr.update_phase(new_phase)
+
+        msg = f"Phase: {old_phase} → {new_phase} | by={by}" + (f" | {reason}" if reason else "")
+        logger.info(f"[PHASE] {msg}")
+        api_server.push_live_msg("system", "Bot", f"⚡ {msg}", self.symbol)
+
+        # Update state cycles counter
+        self.state_mgr.state["cycles_in_phase"] = 0
+        self.state_mgr.state["last_phase_change"] = self._last_phase_change
+        self.state_mgr._save()
+
+    def _check_stuck(self) -> bool:
+        """Python Fix 3: Cek apakah bot stuck, auto-reset kalau perlu."""
+        max_c = self._MAX_CYCLES_PER_PHASE.get(self._phase, 999)
+        self._cycles_in_phase += 1
+        self.state_mgr.state["cycles_in_phase"] = self._cycles_in_phase
+        self.state_mgr._save()
+
+        if self._cycles_in_phase > max_c:
+            logger.warning(
+                f"[STUCK] Phase {self._phase} sudah {self._cycles_in_phase} siklus "
+                f"(max={max_c}) — auto-reset"
+            )
+            api_server.push_live_msg("katyusha", "Katyusha",
+                f"⚠️ Stuck detection: {self._phase} {self._cycles_in_phase} siklus > {max_c} — force reset",
+                self.symbol)
+
+            # Stuck rules sesuai Katyusha spec
+            if self._phase == "fvg_wait":
+                self._set_phase("idm_hunt", "stuck fvg_wait", "stuck_detector")
+            elif self._phase in ("bos_guard", "idm_hunt"):
+                self._set_phase("idm_hunt", f"stuck {self._phase}, reset IDM", "stuck_detector")
+                self._senanan_data = {}
+                self._shina_data   = {}
+                self.watchlist.clear_untriggered()
+            elif self._phase == "entry_sniper":
+                self._set_phase("h1_scan", "stuck entry_sniper, MSS expired", "stuck_detector")
+                self._reset("stuck_entry_sniper")
+            return True
+        return False
+
+    def _validate_entry(self, entry: float, sl: float, tp: float,
+                        current_price: float) -> tuple[bool, str]:
+        """Python Fix 5+6: Validasi entry sebelum order."""
+        if entry <= 0 or sl <= 0 or tp <= 0:
+            return False, "level 0"
+        min_sl_dist = entry * 0.001
+        if abs(entry - sl) < min_sl_dist:
+            return False, f"SL distance terlalu kecil ({abs(entry-sl):.6f} < {min_sl_dist:.6f})"
+        ok, rr = self.validate_rr(entry, sl, tp)
+        if not ok:
+            return False, f"RR {rr:.1f} < 2.0"
+        # Cek apakah level sudah expired (harga sudah > 0.5% dari entry)
+        if current_price > 0 and abs(current_price - entry) / entry > 0.005:
+            return False, f"Entry expired (harga {current_price} vs entry {entry}, selisih {abs(current_price-entry)/entry*100:.1f}%)"
+        return True, f"RR {rr:.1f}"
+
+    def _full_ctx(self, replay_text: str = "", ai_name: str = "") -> dict:
+        """Return semua JSON config + state + candle yang tepat per AI."""
         import json
-        return {
-            # Full JSON — tidak dipotong — semua AI harus lihat seluruh file
+        ctx = {
             "rules":      json.dumps({k:v for k,v in self.rules.rules.items()   if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "logic":      json.dumps({k:v for k,v in self.logic.rules.items()   if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "logic_raw":  {k:v for k,v in self.logic.rules.items() if not k.startswith("_")},
             "prompts":    json.dumps({k:v for k,v in self.prompts.prompts.items() if not k.startswith("_")}, ensure_ascii=False, separators=(',',':')),
             "replay_text": replay_text,
-            # Problem 1: state persistent antar agent
             "state":      self.state_mgr.to_context_str(),
             "state_json": json.dumps(self.state_mgr.state, ensure_ascii=False, separators=(',',':')),
+            # Python Fix 2: inject hiura/senanan/shina data sebagai state antar AI
+            "hiura_data":   json.dumps({k:v for k,v in self._hiura_data.items() if k != "_raw"}, ensure_ascii=False, separators=(',',':')),
+            "senanan_data": json.dumps({k:v for k,v in self._senanan_data.items() if k != "_raw"}, ensure_ascii=False, separators=(',',':')),
+            "shina_data":   json.dumps({k:v for k,v in self._shina_data.items() if k != "_raw"}, ensure_ascii=False, separators=(',',':')),
+            # Python Fix 8: reset_count visible
+            "reset_count":  self.state_mgr.get("reset_count", default=0),
+            "cycles_in_phase": self._cycles_in_phase,
         }
+        return ctx
 
     # ── Phase Handlers ───────────────────────────────────
 
@@ -996,20 +1107,17 @@ class BotCore:
 
             direction = result.get("direction", "buy")
 
-            # Validasi ketat: entry/SL/TP harus berbeda dan SL distance minimal
-            sl_dist = abs(entry - sl) if entry and sl else 0
-            tp_dist = abs(tp - entry) if tp and entry else 0
-            min_sl_dist = entry * 0.001 if entry else 0.0001  # minimal 0.1% dari harga entry
-            rr_check = tp_dist / sl_dist if sl_dist > 0 else 0
+            # Python Fix 6: Validasi entry di Python (tidak hanya percaya AI)
+            ok, reason = self._validate_entry(entry, sl, tp, price)
+            entry_valid = ok and conf >= min_conf
 
-            entry_valid = (
-                entry > 0 and sl > 0 and tp > 0 and
-                abs(entry - sl) > min_sl_dist and   # SL tidak sama dengan entry
-                abs(tp - entry) > min_sl_dist and    # TP tidak sama dengan entry
-                abs(entry - sl) != abs(tp - entry) or rr_check >= 1.5  # RR masuk akal
-            )
+            # Python Fix 9: Ranging check sebelum entry
+            if entry_valid and self.is_ranging(raw.get("h1", [])):
+                logger.info(f"[YUSUF] Skip — market ranging")
+                entry_valid = False
+                reason = "market ranging"
 
-            if entry_valid and conf >= min_conf:
+            if entry_valid:
                 # Guard: pastikan AI tidak naikkan min_confidence melebihi batas atas
                 max_conf_allowed = self.rules.get("entry", "max_confidence_allowed", default=0.85)
                 if min_conf > max_conf_allowed:
@@ -1417,10 +1525,20 @@ KEMAMPUANMU:
 
                 price = raw["price"]
 
-                # 2. Expire watchlist kadaluarsa (Problem 5)
+                # Python Fix 7: Candle freshness check
+                if not self.data.is_candle_fresh():
+                    logger.warning("[BOT] Candle stale — skip siklus ini")
+                    api_server.push_live_msg("system","Bot","⚠️ Data candle stale, skip siklus",self.symbol)
+                    await self._wait_next_m5_close()
+                    continue
+
+                # Expire watchlist kadaluarsa
                 self.watchlist.expire_stale(self._phase)
 
-                # 3. Cek watchlist trigger — event-driven (Problem 2+6)
+                # Python Fix 3: Stuck detection
+                self._check_stuck()
+
+                # Cek watchlist trigger
                 triggered = self.watchlist.check(price, self._prev_price)
                 if triggered:
                     for t in triggered:
