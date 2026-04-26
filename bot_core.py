@@ -512,7 +512,10 @@ class BotCore:
 
             # Stuck rules sesuai Katyusha spec
             if self._phase == "fvg_wait":
+                # Clear watchlist fvg_wait yang sudah tidak relevan
+                self.watchlist.clear_untriggered()
                 self._set_phase("idm_hunt", "stuck fvg_wait", "stuck_detector")
+                self._senanan_data = {}
             elif self._phase in ("bos_guard", "idm_hunt"):
                 self._set_phase("idm_hunt", f"stuck {self._phase}, reset IDM", "stuck_detector")
                 self._senanan_data = {}
@@ -943,6 +946,78 @@ class BotCore:
         else:
             logger.info("[SENANAN] IDM belum ditemukan — tetap di fvg_wait")
 
+    def _run_idm_hunt(self, raw_data: dict):
+        """
+        IDM Hunt: Senanan dipanggil SETIAP M5 close — tidak perlu watchlist trigger.
+        Senanan yang memutuskan sendiri via actions/next_phase ke mana bot lanjut.
+        Ini membuat sistem tidak kaku — AI punya otonomi penuh.
+        """
+        raw = raw_data
+        price = raw.get("price", 0)
+
+        # Ambil context dari Hiura
+        sh     = float(self._hiura_data.get("sh_since_bos", 0) or 0)
+        sl_lvl = float(self._hiura_data.get("sl_before_bos", 0) or 0)
+        bias   = self._hiura_data.get("bias", "neutral")
+        m5_dir = "bearish" if bias == "bullish" else "bullish"
+
+        if not sh and not sl_lvl:
+            logger.info(f"[IDM HUNT] Tidak ada SH/SL dari Hiura — kembali ke h1_scan")
+            self._reset("no_sh_sl_for_idm")
+            return
+
+        logger.info(f"[IDM HUNT] {price} | SH={sh} SL={sl_lvl} | Senanan dipanggil")
+
+        # Inject notifikasi dari AI lain
+        sen_notif = self._get_notifications("senanan")
+        if sen_notif:
+            logger.info(f"[SENANAN] Notifikasi: {sen_notif[:80]}")
+
+        try:
+            result = senanan_idm_hunt(
+                self.clients[1], self.model_ai2,
+                raw, sh, sl_lvl, m5_dir, bias,
+                self._full_ctx(ai_name="senanan"),
+                prompt_ctx=self.prompts.build_context("senanan")
+            )
+        except Exception as e:
+            logger.warning(f"[IDM HUNT] Senanan error: {e}")
+            return
+
+        if not result:
+            logger.warning("[IDM HUNT] Senanan parse gagal")
+            return
+
+        self._senanan_data = result
+        self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
+        self.state_mgr.update_from_senanan(result)
+        self._execute_actions("senanan", result.get("actions", []), raw)
+        self._parse_update_self("senanan", result)
+
+        # next_phase dari Senanan — ikuti tanpa pertanyaan
+        next_p = result.get("next_phase", "")
+        if next_p and next_p in ("fvg_wait", "idm_hunt", "bos_guard", "entry_sniper", "h1_scan"):
+            if next_p != self._phase:
+                self._set_phase(next_p, f"Senanan decision: {result.get('decision','')}", "senanan")
+                # Kalau Senanan minta ke bos_guard, clear watchlist lama dan pasang IDM level
+                if next_p == "bos_guard":
+                    watch_lvl = result.get("watch_level") or result.get("idm_watch_level")
+                    if watch_lvl:
+                        self.watchlist.clear_untriggered()
+                        self.watchlist.add(
+                            level=float(watch_lvl),
+                            condition="touch",
+                            reason=f"IDM watch level — Shina cek MSS",
+                            phase="bos_guard",
+                            session_ref=self._session_id or "senanan",
+                            symbol=self.symbol,
+                            assigned_to="shina",
+                            action="check_mss",
+                        )
+        elif result.get("decision") == "idm_found":
+            # IDM found tapi tidak ada next_phase — default ke bos_guard
+            self._set_phase("bos_guard", "IDM found by Senanan", "senanan")
+
     def _run_bos_guard(self, raw_data: dict, triggered_items: list):
         """
         Tunggu IDM M5 disentuh, lalu Shina analisis BOS/MSS.
@@ -959,28 +1034,17 @@ class BotCore:
         # Cek watchlist yang di-assign ke AI spesifik
         ai_items = [t for t in triggered_items if t.get("assigned_to") in ("hiura","senanan","shina","yusuf") and t not in katyusha_items]
 
-        if not triggered_items or (triggered_items and not [t for t in triggered_items if t.get("phase") == "bos_guard" and not t.get("assigned_to")]):
-            # Update watchlist dinamis tiap siklus — tambah level baru di sekitar harga kalau watchlist aktif < 2
-            active = self.watchlist.get_active()
-            bos_guard_wl = [w for w in active if w.get("phase") == "bos_guard"]
-            if len(bos_guard_wl) < 2 and self._senanan_data:
-                idm_watch = self._senanan_data.get("watch_level", 0)
-                freeze_h  = self._shina_data.get("freeze_high", 0)
-                freeze_l  = self._shina_data.get("freeze_low",  0)
-                if freeze_h and freeze_l and freeze_h > freeze_l:
-                    self.watchlist.add(level=freeze_h, condition="break_above", reason="freeze high — MSS bullish jika tembus",
-                                       phase="bos_guard", session_ref=self._session_id, assigned_to="shina", action="check_mss")
-                    self.watchlist.add(level=freeze_l, condition="break_below", reason="freeze low — BOS M5 bearish jika tembus",
-                                       phase="bos_guard", session_ref=self._session_id, assigned_to="shina", action="check_mss")
-            if not triggered_items or not [t for t in triggered_items if t.get("phase") == "bos_guard" and not t.get("assigned_to")]:
-                logger.info(f"[BOS GUARD] {price} | tunggu IDM touch | watchlist: {len(bos_guard_wl)} level")
-                return
+        # Shina dipanggil SETIAP siklus di bos_guard — tidak harus nunggu trigger
+        # Trigger hanya jadi konteks tambahan (mana level yang disentuh)
+        triggered_lvls = [t["level"] for t in triggered_items if t.get("phase") == "bos_guard"]
+        if triggered_lvls:
+            logger.info(f"[BOS GUARD] Trigger @ {triggered_lvls} — Shina dipanggil dengan konteks trigger")
+        else:
+            logger.info(f"[BOS GUARD] {price} | Shina monitoring setiap siklus")
 
-        item = triggered_items[-1]
-        logger.info(f"[BOS GUARD] IDM M5 disentuh @ {item['level']:.2f} — panggil Shina")
         shina_notif = self._get_notifications("shina")
         if shina_notif:
-            logger.info(f"[SHINA] Notifikasi masuk: {shina_notif[:100]}")
+            logger.info(f"[SHINA] Notifikasi: {shina_notif[:80]}")
 
         bias = self._hiura_data.get("bias", "neutral")
         sh   = self._hiura_data.get("sh_since_bos", 0)
@@ -1644,7 +1708,11 @@ KEMAMPUANMU:
                 elif self._phase == "fvg_wait":
                     self._run_fvg_wait(raw, triggered)
 
-                elif self._phase in ("bos_guard", "idm_hunt"):
+                elif self._phase == "idm_hunt":
+                    # idm_hunt: Senanan dipanggil SETIAP siklus, tidak perlu trigger
+                    self._run_idm_hunt(raw)
+
+                elif self._phase == "bos_guard":
                     self._run_bos_guard(raw, triggered)
 
                 elif self._phase == "entry_sniper":
