@@ -201,12 +201,19 @@ def get_live_feed():
 
 @app.route("/api/main")
 def get_main_session():
-    """Sesi 'main' — metadata saja, messages via /api/live/feed."""
+    """
+    Sesi main — backward compat: return 20 pesan terbaru + total.
+    HTML baru pakai /api/live/feed untuk pagination penuh.
+    """
+    total = len(_main_session_messages)
+    recent = _main_session_messages[-20:]  # max 20 agar tidak berat
     return jsonify({
         "id":         "main",
-        "total_msgs": len(_main_session_messages),
+        "messages":   recent,
+        "total_msgs": total,
+        "has_more":   total > 20,
         "conclusion": _main_session_conclusion,
-        "status":     "active",
+        "status":     "active" if total > 0 else "idle",
     })
 
 
