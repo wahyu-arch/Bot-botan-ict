@@ -77,11 +77,11 @@ class BotCore:
         # Qwen QwQ 32B (thinking) untuk Shina — paling butuh deep reasoning
         # Model ringan untuk Hiura/Senanan — lebih sering dipanggil
         # Default bisa di-override via env vars di Railway
-        self.model_main = os.getenv("GROQ_MODEL_MAIN", "qwen-qwq-32b")           # Hiura — H1 analyst
-        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "qwen-qwq-32b")           # Senanan — IDM hunter
-        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "qwen-qwq-32b")           # Shina — BOS/MSS (paling butuh thinking)
-        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "qwen-qwq-32b")           # Yusuf — entry sniper
-        self.model_json = os.getenv("GROQ_MODEL_JSON",  "qwen-qwq-32b")          # fallback JSON
+        self.model_main = os.getenv("GROQ_MODEL_MAIN", "llama-3.3-70b-versatile")  # Hiura
+        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "llama-3.3-70b-versatile")  # Senanan
+        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "llama3-70b-8192")          # Shina (limit terpisah)
+        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "gemma2-9b-it")            # Yusuf (ringan)
+        self.model_json = os.getenv("GROQ_MODEL_JSON",  "llama-3.3-70b-versatile")  # JSON fallback
 
         # Clients
         self.client_main = Groq(api_key=groq_key)
