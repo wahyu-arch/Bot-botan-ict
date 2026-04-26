@@ -150,18 +150,63 @@ def push_live_msg(ai: str, nama: str, pesan: str, symbol: str = ""):
 
 @app.route("/api/live/feed")
 def get_live_feed():
-    """Alias untuk kompatibilitas — return main session messages."""
-    return jsonify(_main_session_messages)
+    """
+    Live feed dengan pagination.
+    Query params:
+      ?limit=20          — jumlah pesan per halaman (default 20)
+      ?before=<idx>      — ambil pesan sebelum index ini (untuk load more)
+      ?after=<idx>       — ambil pesan setelah index ini (untuk polling update terbaru)
+    Response: {messages, total, has_more, oldest_idx, newest_idx}
+    """
+    total   = len(_main_session_messages)
+    limit   = min(int(request.args.get("limit", 20)), 100)
+    before  = request.args.get("before", None)
+    after   = request.args.get("after",  None)
+
+    if after is not None:
+        # Polling mode: ambil pesan BARU setelah index tertentu
+        after_idx = int(after)
+        msgs = _main_session_messages[after_idx:]
+        return jsonify({
+            "messages":   msgs,
+            "total":      total,
+            "has_more":   after_idx > 0,
+            "oldest_idx": after_idx,
+            "newest_idx": total,
+        })
+    elif before is not None:
+        # Load more: ambil 20 pesan sebelum index tertentu
+        before_idx = int(before)
+        start = max(0, before_idx - limit)
+        msgs  = _main_session_messages[start:before_idx]
+        return jsonify({
+            "messages":   msgs,
+            "total":      total,
+            "has_more":   start > 0,
+            "oldest_idx": start,
+            "newest_idx": before_idx,
+        })
+    else:
+        # Initial load: 20 pesan terbaru
+        start = max(0, total - limit)
+        msgs  = _main_session_messages[start:]
+        return jsonify({
+            "messages":   msgs,
+            "total":      total,
+            "has_more":   start > 0,
+            "oldest_idx": start,
+            "newest_idx": total,
+        })
 
 
 @app.route("/api/main")
 def get_main_session():
-    """Sesi 'main' — semua aktivitas monitoring bot."""
+    """Sesi 'main' — metadata saja, messages via /api/live/feed."""
     return jsonify({
-        "id": "main",
-        "messages": _main_session_messages,
+        "id":         "main",
+        "total_msgs": len(_main_session_messages),
         "conclusion": _main_session_conclusion,
-        "status": "active",
+        "status":     "active",
     })
 
 
