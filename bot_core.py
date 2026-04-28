@@ -40,6 +40,7 @@ from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 import api_server
 from api_server import is_katyusha_enabled
+import ai_config as _ai_cfg
 
 logger = logging.getLogger(__name__)
 os.makedirs("logs", exist_ok=True)
@@ -77,11 +78,11 @@ class BotCore:
         # Qwen QwQ 32B (thinking) untuk Shina — paling butuh deep reasoning
         # Model ringan untuk Hiura/Senanan — lebih sering dipanggil
         # Default bisa di-override via env vars di Railway
-        self.model_main = os.getenv("GROQ_MODEL_MAIN", "qwen/qwen3-32b")  # Hiura
-        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "qwen/qwen3-32b")  # Senanan
-        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "qwen/qwen3-32b")          # Shina (limit terpisah)
-        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "qwen/qwen3-32b")            # Yusuf (ringan)
-        self.model_json = os.getenv("GROQ_MODEL_JSON",  "qwen/qwen3-32b")  # JSON fallback
+        self.model_main = os.getenv("GROQ_MODEL_MAIN", "llama-3.3-70b-versatile")  # Hiura
+        self.model_ai1  = os.getenv("GROQ_MODEL_AI1",  "llama-3.3-70b-versatile")  # Senanan
+        self.model_ai2  = os.getenv("GROQ_MODEL_AI2",  "llama3-70b-8192")          # Shina (limit terpisah)
+        self.model_ai3  = os.getenv("GROQ_MODEL_AI3",  "gemma2-9b-it")            # Yusuf (ringan)
+        self.model_json = os.getenv("GROQ_MODEL_JSON",  "llama-3.3-70b-versatile")  # JSON fallback
 
         # Clients
         self.client_main = Groq(api_key=groq_key)
@@ -1414,6 +1415,15 @@ KEMAMPUANMU:
                             self._replay.reset(); self._last_bos_lvl = 0.0
                         logger.info(f"[CHAT] Katyusha force phase: {old_p} → {op}")
                         clean_answer += f"\n🎯 Phase dipindah: {old_p} → {op}"
+
+                    # Apply AI config changes (edit data/ai/<n>.json)
+                    for ai_change in changes.get("ai_config_changes", []):
+                        ai_name  = ai_change.get("ai", "")
+                        ai_field = ai_change.get("key", "")
+                        ai_val   = ai_change.get("new")
+                        if ai_name and ai_field and ai_val is not None:
+                            _ai_cfg.save(ai_name, {ai_field: ai_val})
+                            logger.info(f"[KATYUSHA] AI config updated: {ai_name}.{ai_field}")
 
                     # Apply watchlist additions dari Katyusha
                     wl_adds = changes.get("watchlist_adds", [])

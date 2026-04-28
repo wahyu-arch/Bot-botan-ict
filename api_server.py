@@ -294,6 +294,33 @@ def katyusha_status():
     return jsonify({"enabled": _katyusha_enabled})
 
 
+@app.route("/api/ai/<ai_name>")
+def get_ai_config(ai_name: str):
+    """Baca config AI dari data/ai/<ai_name>.json."""
+    import os, json
+    path = f"data/ai/{ai_name}.json"
+    if not os.path.exists(path):
+        return jsonify({"error": f"{ai_name}.json tidak ditemukan"}), 404
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ai/<ai_name>", methods=["POST"])
+def update_ai_config(ai_name: str):
+    """Update field di data/ai/<ai_name>.json (dipakai Katyusha)."""
+    import os, json
+    data = request.get_json(silent=True) or {}
+    try:
+        from ai_config import save as _ai_save, invalidate_cache
+        ok = _ai_save(ai_name, data)
+        return jsonify({"ok": ok, "ai": ai_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/state")
 def get_state():
     """Trading state persistent: BOS, IDM, MSS, reset_count, dll."""

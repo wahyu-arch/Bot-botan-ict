@@ -18,6 +18,8 @@ from candle_replay import ReplayEngine, format_replay_for_ai
 
 logger = logging.getLogger(__name__)
 
+import ai_config as _ai_cfg
+
 
 def _load_json_files() -> dict:
     """Baca langsung dari file JSON di data/ — sumber kebenaran tunggal."""
@@ -45,41 +47,75 @@ def _load_json_files() -> dict:
 
 
 def _build_json_ctx(ctx: dict) -> str:
-    """Bangun konteks lengkap untuk AI — rules, logic, prompts, state antar AI, dan reset_count."""
+    """
+    Bangun context ringkas untuk AI — hanya data yang benar-benar dibutuhkan.
+    Tidak dump full JSON supaya tidak 413 Payload Too Large di Groq.
+    """
     if not ctx:
         return ""
+    import json as _json
     parts = []
 
-    # Trading state — taruh di atas agar AI selalu lihat duluan
+    # 1. Trading state — paling penting, selalu ada
     if ctx.get("state"):
         parts.append(ctx["state"])
 
-    # State dari AI lain (Python Fix 2: context persistence antar AI)
-    ai_states = []
-    if ctx.get("hiura_data") and ctx["hiura_data"] != "{}":
-        ai_states.append(f"Hiura last output: {ctx['hiura_data']}")
-    if ctx.get("senanan_data") and ctx["senanan_data"] != "{}":
-        ai_states.append(f"Senanan last output: {ctx['senanan_data']}")
-    if ctx.get("shina_data") and ctx["shina_data"] != "{}":
-        ai_states.append(f"Shina last output: {ctx['shina_data']}")
-    if ai_states:
-        parts.append("=== STATE DARI AI LAIN ===\n" + "\n".join(ai_states))
-
-    # Reset count dan stuck info
-    rc = ctx.get("reset_count", 0)
+    # 2. Reset count kalau relevan
+    rc  = ctx.get("reset_count", 0)
     cyc = ctx.get("cycles_in_phase", 0)
     if rc > 0 or cyc > 3:
         parts.append(f"⚠️ reset_count={rc} | cycles_in_phase={cyc}")
 
+    # 3. State dari AI lain — ringkas, bukan full JSON
+    def _summarize_ai(data_str: str, ai_label: str) -> str:
+        if not data_str or data_str == "{}":
+            return ""
+        try:
+            d = _json.loads(data_str)
+            # Ambil field penting saja
+            keys = ["bias","bos_level","bos_type","sh_since_bos","sl_before_bos",
+                    "fvg_zone","idm_watch_level","idm_candle_a","freeze_range",
+                    "mss_candle","decision","next_phase","watch_level"]
+            summary = {k: d[k] for k in keys if k in d and d[k]}
+            return f"{ai_label}: {_json.dumps(summary, separators=(',',':'))}" if summary else ""
+        except Exception:
+            return ""
+
+    ai_summaries = []
+    for key, label in [("hiura_data","Hiura"),("senanan_data","Senanan"),("shina_data","Shina")]:
+        s = _summarize_ai(ctx.get(key,"{}"), label)
+        if s:
+            ai_summaries.append(s)
+    if ai_summaries:
+        parts.append("=== STATE AI ===\n" + "\n".join(ai_summaries))
+
+    # 4. Rules — hanya section kecil yang relevan (entry, tp, sl, risk)
+    if ctx.get("logic_raw"):
+        lr = ctx["logic_raw"]
+        relevant = {k: lr[k] for k in ["find_bos_h1","find_fvg_h1","find_idm_m5",
+                                         "find_bos_m5","entry","stop_loss","take_profit"]
+                    if k in lr}
+        if relevant:
+            parts.append(f"=== LOGIC (ringkas) ===\n{_json.dumps(relevant, separators=(',',':'))}")
+    elif ctx.get("logic"):
+        # Potong maksimal 800 karakter
+        parts.append(f"=== LOGIC ===\n{ctx['logic'][:800]}")
+
+    # 5. Rules entry/risk saja
     if ctx.get("rules"):
-        parts.append(f"=== RULES ===\n{ctx['rules']}")
-    if ctx.get("logic"):
-        parts.append(f"=== LOGIC ===\n{ctx['logic']}")
-    if ctx.get("prompts"):
-        parts.append(f"=== PROMPTS ===\n{ctx['prompts']}")
+        try:
+            r = _json.loads(ctx["rules"]) if isinstance(ctx["rules"], str) else ctx["rules"]
+            mini = {k: r[k] for k in ["entry","sl","tp","risk","trailing_sl"] if k in r}
+            parts.append(f"=== RULES ===\n{_json.dumps(mini, separators=(',',':'))}")
+        except Exception:
+            pass
+
+    # 6. Replay text kalau ada
     if ctx.get("replay_text"):
-        parts.append(f"=== REPLAY ===\n{ctx['replay_text']}")
-    return "\n\n".join(parts) if parts else ""
+        # Potong replay supaya tidak terlalu panjang
+        parts.append(f"=== REPLAY ===\n{ctx['replay_text'][:600]}")
+
+    return "\n\n".join(p for p in parts if p) if parts else ""
 
 
 # ── Helpers ─────────────────────────────────────────────
@@ -190,6 +226,23 @@ def _call_with_retry(client, model: str, prompt: str,
     return None
 
 
+def _build_notify_ctx(ctx: dict) -> str:
+    """Format notifikasi dari AI lain untuk dimasukkan ke prompt."""
+    import json as _j
+    parts = []
+    for key, label in [("hiura_data","Hiura"),("senanan_data","Senanan"),("shina_data","Shina")]:
+        d = ctx.get(key, "{}")
+        if d and d != "{}":
+            try:
+                parsed = _j.loads(d)
+                msg = parsed.get("chat_msg") or parsed.get("analysis","")
+                if msg:
+                    parts.append(f"[Dari {label}]: {msg[:120]}")
+            except Exception:
+                pass
+    return "\n".join(parts) if parts else ""
+
+
 def _candle_table(candles: list, limit: int = 40) -> str:
     """Format candle OHLC jadi teks ringkas."""
     rows = []
@@ -211,7 +264,7 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     Hiura analisis H1 dari data mentah.
     Dia sendiri yang tentukan ada BOS atau tidak, FVG mana yang valid, range SH/SL.
     """
-    h1_table = _candle_table(raw_data["h1"], limit=100)
+    h1_table = _candle_table(raw_data["h1"], limit=80)
     price = raw_data["price"]
 
     # Replay sudah dihandle di bot_core via ReplayEngine
@@ -234,69 +287,20 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     sw_ex    = bos_cfg.get("example", "")
     fvg_min  = fvg_cfg.get("min_gap_pct", 0.05)
 
-    prompt = f"""Kamu adalah Hiura, analis struktur H1 ICT.
-Harga sekarang: {price}
+    # Prompt dari data/ai/hiura.json — tidak hardcode di Python
+    candle_limit = _ai_cfg.get_candle_limit("hiura", "h1")
+    h1_table = _candle_table(raw_data["h1"], limit=candle_limit)
+    notify_ctx = _build_notify_ctx(ctx)
+    prompt = _ai_cfg.build_prompt("hiura", {
+        "state_ctx":    _build_json_ctx(ctx),
+        "candle_table": f"CANDLE H1 ({candle_limit} terakhir):\n{h1_table}",
+        "notify_ctx":   notify_ctx,
+        "price":        str(raw_data.get("price", "")),
+    })
+    if not prompt:
+        logger.warning("[HIURA] Gagal build prompt dari hiura.json — fallback")
+        prompt = f"Kamu Hiura. Analisis BOS H1. Harga: {raw_data.get('price')}. Balas JSON."
 
-HASIL REPLAY H1 (Python sudah baca kiri ke kanan — ini yang paling akurat):
-{replay_text}
-
-DATA CANDLE H1 LENGKAP (untuk verifikasi):
-{h1_table}
-
-{_build_json_ctx(ctx)}
-
-{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU — ikuti RULES dari JSON di atas:
-
-1. BACA HASIL REPLAY di atas — Python sudah hitung swing valid dan BOS menggunakan rules swing_left={sw_left} swing_right={sw_right}.
-   GUNAKAN hasil replay sebagai acuan utama. Verifikasi dengan candle kalau perlu.
-
-2. CARI SWING LOW/HIGH VALID (konfirmasi dari replay):
-   - swing_left={sw_left}: minimal {sw_left} candle SEBELUM candle X tidak ada yang lebih rendah (untuk swing low)
-   - swing_right={sw_right}: minimal {sw_right} candle SESUDAH candle X tidak ada yang lebih rendah
-   - Kedua syarat HARUS terpenuhi untuk swing valid
-   {f"- {sw_def}" if sw_def else ""}
-   {f"- CONTOH: {sw_ex}" if sw_ex else ""}
-
-3. BOS H1 — gunakan level PERSIS dari replay di atas (swing_level field):
-   - BOS bearish: cari swing low valid → ada candle yang CLOSE di bawah swing low itu
-   - BOS bullish: cari swing high valid → ada candle yang CLOSE di atas swing high itu
-   - Gunakan low/high PERSIS dari candle swing (field L: atau H: di tabel), JANGAN bulatkan
-   - BOS terbentuk di LEVEL SWING yang ditembus, bukan di level candle yang break
-
-4. FVG H1 — gunakan FVG dari replay di atas (sudah difilter arah dan min_gap):
-   - FVG bearish: candle[i].L > candle[i+2].H — gap turun, harga tidak menyentuh zona ini
-   - FVG bullish: candle[i].H < candle[i+2].L — gap naik
-   - FVG harus SETELAH candle BOS terbentuk (idx > bos_candle_idx)
-   - FVG filled = ada candle yang close menembus zona (wick masuk = belum filled)
-   - Gap minimum {fvg_min}% dari harga
-
-4. SWING RANGE setelah BOS:
-   - BOS bearish: SH = high tertinggi SETELAH BOS candle, SL = swing low yang jadi BOS itu sendiri
-   - BOS bullish: SL = low terendah SETELAH BOS candle, SH = swing high yang jadi BOS
-
-5. WATCHLIST:
-   - BOS bearish: level FVG bearish untuk retrace naik (harga naik sentuh FVG dari bawah)
-   - BOS bullish: level FVG bullish untuk retrace turun
-   - Gunakan harga PERSIS dari candle
-
-Balas JSON murni:
-{{
-  "bias": "bullish|bearish|neutral",
-  "bos_found": true,
-  "bos_type": "bullish_bos|bearish_bos",
-  "bos_level": 0.0,
-  "bos_candle_idx": 0,
-  "sh_since_bos": 0.0,
-  "sl_before_bos": 0.0,
-  "fvg_list": [
-    {{"type": "bullish|bearish", "high": 0.0, "low": 0.0, "candle_idx": 0, "fresh": true}}
-  ],
-  "watchlist": [
-    {{"level": 0.0, "condition": "touch", "reason": "FVG high/low @ X.XX"}}
-  ],
-  "chat_msg": "pesan ke grup WA max 2 kalimat",
-  "confidence": 0.0
-}}"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=800, temp=0.2)
     if not parsed:
@@ -332,7 +336,7 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
     direction_cfg = idm_cfg.get(m5_idm_direction, {})
     gap_min = direction_cfg.get("gap_min_candles", 1)
     touch_rule = direction_cfg.get("touch_rule", "wick_or_body")
-    m5_table = _candle_table(raw_data["m5"], limit=100)
+    m5_table = _candle_table(raw_data["m5"], limit=60)
     price = raw_data["price"]
 
     # Jalankan replay M5 Python dulu — hasilnya dikirim ke AI sebagai konteks
@@ -347,59 +351,18 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
         logger.warning(f"[SENANAN] replay_m5 error: {_e}")
         replay_m5_text = f"(Replay M5 tidak tersedia: {_e})"
 
-    prompt = f"""Kamu adalah Senanan, spesialis IDM (Inducement) di M5 ICT.
-Harga sekarang: {price}
-Bias H1: {bias_h1}
-Range yang diberikan Hiura: SH={sh} SL={sl}
-Cari IDM arah: {m5_idm_direction} ({"bearish karena H1 bullish - M5 retrace turun" if m5_idm_direction == "bearish" else "bullish karena H1 bearish - M5 retrace naik"})
+    # Prompt dari data/ai/senanan.json
+    candle_limit = _ai_cfg.get_candle_limit("senanan", "m5")
+    m5_table = _candle_table(raw_data["m5"], limit=candle_limit)
+    notify_ctx = _build_notify_ctx(ctx)
+    prompt = _ai_cfg.build_prompt("senanan", {
+        "state_ctx":    _build_json_ctx(ctx),
+        "candle_table": f"CANDLE M5 ({candle_limit} terakhir):\n{m5_table}",
+        "notify_ctx":   notify_ctx,
+    })
+    if not prompt:
+        prompt = f"Kamu Senanan. Cari IDM M5 di range SH-SL. Harga: {raw_data.get('price')}. Balas JSON."
 
-HASIL REPLAY M5 (Python sudah baca kiri ke kanan):
-{replay_m5_text}
-
-DATA CANDLE M5 (untuk verifikasi):
-{m5_table}
-
-{_build_json_ctx(ctx)}
-
-{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
-Cari IDM {m5_idm_direction} di M5 dalam range harga {sl}–{sh}.
-PRIORITAS: Gunakan hasil replay Python di atas. Konfirmasi watch_level dan set watchlist.
-
-DEFINISI IDM (verifikasi):
-- IDM {m5_idm_direction}: 
-  {"Candle A buat swing HIGH → minimal 1 candle tidak tembus high A → tembus → Watch level = LOW candle A" if m5_idm_direction == "bearish" else "Candle A buat swing LOW → gap → tembus → Watch level = HIGH candle A"}
-
-- Cari dari candle terbaru (paling bawah tabel) ke atas
-- IDM harus dalam range harga {sl}–{sh}
-- Level watch (yang harus disentuh harga) = {"low candle A untuk IDM bearish" if m5_idm_direction == "bearish" else "high candle A untuk IDM bullish"}
-- Sentuh = wick atau body menyentuh level watch
-
-Jika tidak ada IDM dalam range, set idm_found=false.
-
-Balas JSON murni:
-{{
-  "idm_found": true,
-  "idm_type": "bullish_idm|bearish_idm",
-  "candle_a_idx": 0,
-  "candle_a_high": 0.0,
-  "candle_a_low": 0.0,
-  "watch_level": 0.0,
-  "watch_condition": "touch",
-  "watch_reason": "low/high candle A IDM @ X.XX",
-  "watchlist": [
-    {{"level": 0.0, "condition": "touch", "reason": "IDM watch level", "assigned_to": "shina", "action": "check_mss"}}
-  ],
-  "actions": [
-    {{"type": "force_phase", "phase": "bos_guard"}},
-    {{"type": "add_watchlist", "level": 0.0, "condition": "break_above", "reason": "freeze high → Shina cek MSS", "assigned_to": "shina", "action": "check_mss"}},
-    {{"type": "notify", "to": "shina", "message": "IDM confirmed, freeze range siap dicek"}}
-  ],
-  "next_phase": "bos_guard",
-  "chat_msg": "pesan ke grup WA max 2 kalimat",
-  "confidence": 0.0
-}}
-
-AUTHORITY SENANAN: force_phase(bos_guard/fvg_wait/h1_scan), add_watchlist(→shina/hiura), notify"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:
@@ -430,61 +393,23 @@ def shina_bos_mss(client: Groq, model: str, raw_data: dict,
     logic = json_data.get("logic_raw", {})
     bos_m5_cfg = logic.get("find_bos_m5", {})
     mss_m5_cfg = logic.get("find_mss_m5", {})
-    m5_table = _candle_table(raw_data["m5"], limit=80)
+    m5_table = _candle_table(raw_data["m5"], limit=60)
     price = raw_data["price"]
     watch_level = idm_info.get("watch_level", 0)
     idm_type = idm_info.get("idm_type", "")
 
-    prompt = f"""Kamu adalah Shina, penjaga BOS/MSS M5 ICT.
-Harga sekarang: {price}
-Bias H1: {bias_h1}
-IDM M5 yang baru disentuh: {idm_type} @ watch level {watch_level}
-Range aktif: SH={sh} SL={sl}
+    # Prompt dari data/ai/shina.json
+    candle_limit = _ai_cfg.get_candle_limit("shina", "m5")
+    m5_table = _candle_table(raw_data["m5"], limit=candle_limit)
+    notify_ctx = _build_notify_ctx(ctx)
+    prompt = _ai_cfg.build_prompt("shina", {
+        "state_ctx":    _build_json_ctx(ctx),
+        "candle_table": f"CANDLE M5 ({candle_limit} terakhir):\n{m5_table}",
+        "notify_ctx":   notify_ctx,
+    })
+    if not prompt:
+        prompt = f"Kamu Shina. Cek MSS M5 freeze range. Harga: {raw_data.get('price')}. Balas JSON."
 
-DATA CANDLE M5 (closed, terbaru di bawah):
-{m5_table}
-
-{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
-Setelah IDM disentuh, cek apakah terjadi BOS atau MSS di M5.
-
-DEFINISI:
-- Freeze range = area dari candle IDM terbentuk sampai candle IDM disentuh
-  Freeze high = highest high dalam range itu
-  Freeze low  = lowest low dalam range itu
-
-Untuk bias H1 {bias_h1}:
-{"- BOS bearish M5: ada close CANDLE di bawah freeze low → lanjut ke entry sniper (tunggu MSS)" if bias_h1 == "bullish" else "- BOS bullish M5: ada close CANDLE di atas freeze high → lanjut ke entry sniper (tunggu MSS)"}
-{"- MSS bullish M5: setelah BOS bearish, ada close di ATAS freeze high → entry signal!" if bias_h1 == "bullish" else "- MSS bearish M5: setelah BOS bullish, ada close di BAWAH freeze low → entry signal!"}
-- Jika tidak ada BOS/MSS: keputusan = wait, set watchlist di freeze high/low
-
-Tentukan freeze range dari candle terbaru dan beri keputusan.
-
-Balas JSON murni:
-{{
-  "freeze_high": 0.0,
-  "freeze_low": 0.0,
-  "bos_found": false,
-  "bos_type": "bearish_bos_m5|bullish_bos_m5",
-  "mss_found": false,
-  "mss_type": "bullish_mss_m5|bearish_mss_m5",
-  "mss_candle_high": 0.0,
-  "mss_candle_low": 0.0,
-  "decision": "entry|wait|reset_idm",
-  "watchlist": [
-    {{"level": 0.0, "condition": "break_above|break_below|touch", "reason": "freeze high/low", "assigned_to": "yusuf", "action": "entry"}}
-  ],
-  "actions": [
-    {{"type": "force_phase", "phase": "entry_sniper"}},
-    {{"type": "add_watchlist", "level": 0.0, "condition": "touch", "reason": "MSS → Yusuf entry", "assigned_to": "yusuf", "action": "entry"}},
-    {{"type": "notify", "to": "yusuf", "message": "MSS confirmed, entry siap"}},
-    {{"type": "force_phase", "phase": "idm_hunt"}}
-  ],
-  "next_phase": "entry_sniper",
-  "chat_msg": "pesan ke grup WA max 2 kalimat",
-  "confidence": 0.0
-}}
-
-AUTHORITY SHINA: force_phase(entry_sniper/bos_guard/idm_hunt/fvg_wait), add_watchlist(→yusuf), notify(→yusuf)"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=700, temp=0.2)
     if not parsed:
@@ -548,59 +473,20 @@ def yusuf_entry(client: Groq, model: str, raw_data: dict,
     freeze_high = shina_data.get("freeze_high", 0)
     freeze_low  = shina_data.get("freeze_low",  0)
 
-    prompt = f"""Kamu adalah Yusuf, entry sniper ICT.
-Harga sekarang: {price}
-Bias H1: {bias}
-SH sejak BOS: {sh_since_bos} | SL sebelum BOS: {sl_before_bos}
-MSS candle: High={mss_high} Low={mss_low}
-Freeze range M5: {freeze_low}–{freeze_high}
+    # Prompt dari data/ai/yusuf.json
+    candle_limit = _ai_cfg.get_candle_limit("yusuf", "m5")
+    m5_recent = _candle_table(raw_data.get("m5", []), limit=candle_limit)
+    notify_ctx = _build_notify_ctx(ctx)
+    prompt = _ai_cfg.build_prompt("yusuf", {
+        "state_ctx":    _build_json_ctx(ctx),
+        "candle_table": f"CANDLE M5 ({candle_limit} terakhir):\n{m5_recent}",
+        "notify_ctx":   notify_ctx,
+        "price":        str(raw_data.get("price", "")),
+        "bias":         hiura_data.get("bias", ""),
+    })
+    if not prompt:
+        prompt = f"Kamu Yusuf. Hitung entry/SL/TP dari MSS candle. Harga: {raw_data.get('price')}. Balas JSON."
 
-⚠️ PENTING: Gunakan angka PERSIS dari data candle di bawah. JANGAN bulatkan ke 0.21, 0.20 dll.
-Harga koin ini bernilai {price} — presisi 5-6 desimal wajib untuk entry, SL, TP.
-
-CANDLE M5 TERBARU (20 candle terakhir):
-{m5_recent}
-
-FVG H1 (referensi zona):
-{fvg_text}
-
-{mem_text}
-{_build_json_ctx(ctx)}
-
-{('INSTRUKSI KATYUSHA: ' + prompt_ctx + chr(10)) if prompt_ctx else ''}TUGASMU:
-Tentukan entry paling presisi. Gunakan angka PERSIS dari tabel candle M5 di atas.
-
-RULES ENTRY (dari logic_rules.json — WAJIB DIIKUTI):
-- Entry saat MSS terkonfirmasi
-- FVG H1 role: reference_only — info tambahan, bukan gate wajib
-- Bias bullish: entry limit di area MSS candle close atau sedikit di bawahnya
-- Bias bearish: entry limit di area MSS candle close atau sedikit di atasnya
-
-RULES SL (dari logic_rules.json — WAJIB DIIKUTI):
-- Bias bullish: SL = low candle MSS. Buffer: {{sl_buf}}%
-- Bias bearish: SL = high candle MSS. Buffer: {{sl_buf}}%
-
-RULES TP (dari logic_rules.json — WAJIB DIIKUTI):
-- Bias bullish: TP = highest high sejak BOS H1
-- Bias bearish: TP = lowest low sejak BOS H1
-- Min RR = {{min_rr}} — skip kalau RR < {{min_rr}}
-
-Balas JSON murni:
-{{
-  "decision": "entry|skip",
-  "skip_reason": "",
-  "direction": "buy|sell",
-  "entry": 0.0,
-  "sl": 0.0,
-  "tp": 0.0,
-  "rr": 0.0,
-  "setup_type": "MSS_confirmed|MSS_in_FVG|MSS_outside_FVG|skip",
-  "in_fvg_zone": true,
-  "sl_reason": "low/high MSS candle @ X.XXXXXX (presisi penuh)",
-  "tp_reason": "liquidity pool @ X.XXXXXX (presisi penuh)",
-  "chat_msg": "pesan ke grup WA max 3 kalimat",
-  "confidence": 0.0
-}}"""
 
     parsed = _call_with_retry(client, model, prompt, max_tokens=600, temp=0.15)
     if not parsed:
