@@ -48,16 +48,9 @@ def init_data_files():
     if skipped:
         logger.info(f"[INIT] File dipertahankan (sudah ada): {skipped}")
 
-    # Init AI config files — copy dari repo ke data/ai/ kalau belum ada
-    os.makedirs(AI_CONFIG_DST, exist_ok=True)
-    for fname in AI_CONFIG_FILES:
-        dst = os.path.join(AI_CONFIG_DST, fname)
-        src_path = os.path.join("data_ai_defaults", fname)  # bundled di repo
-        # Juga cek di data/ai/ langsung (sudah ada di ZIP)
-        if not os.path.exists(dst):
-            logger.warning(f"[INIT] AI config tidak ada di volume: {fname} — ini normal saat pertama deploy")
-        else:
-            logger.debug(f"[INIT] AI config exists: {fname}")
+    # Init AI config files — data/ai/ akan di-create otomatis oleh ai_config.py
+    # Tidak perlu copy di sini karena ai_config._create_default() handle itu
+    os.makedirs("data/ai", exist_ok=True)
 
     return {"copied": copied, "skipped": skipped}
 
