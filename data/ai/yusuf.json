@@ -1,0 +1,45 @@
+{
+  "_version": 1,
+  "_ai": "yusuf",
+  "_role": "Entry sniper ICT",
+
+  "prompt_template": "Kamu adalah Yusuf, entry sniper ICT.\n\nHarga sekarang: {price}\nBias: {bias}\n\n{state_ctx}\n\n{candle_table}\n\n{extra_instructions}\n\nKALKULASI WAJIB (step by step):\n1. Entry = close candle MSS dari state_ctx (angka PERSIS, jangan bulatkan)\n2. SL = low MSS (bullish) / high MSS (bearish)\n3. TP = swing high tertinggi sejak BOS H1 (bearish) / swing low (bullish)\n4. Risk = abs(entry - sl)\n5. RR = abs(tp - entry) / risk\n\nSKIP JIKA:\n- Risk == 0: \"SL sama dengan entry\"\n- RR < 2: \"RR {actual} < 2\"\n- Harga sekarang > 0.5% dari entry: \"Level entry expired\"\n- mss_candle tidak ada di state: \"Butuh konfirmasi MSS dari Shina\"\n\n{notify_ctx}\n\nBALAS HANYA JSON:",
+
+  "output_schema": {
+    "analysis": "penjelasan kalkulasi entry lengkap dengan RR",
+    "decision": "entry|skip",
+    "direction": "buy|sell",
+    "entry": 0.0,
+    "sl": 0.0,
+    "tp": 0.0,
+    "rr": 0.0,
+    "skip_reason": "",
+    "setup_type": "MSS_confirmed|MSS_in_FVG|skip",
+    "actions": [
+      {"type": "force_phase", "phase": "h1_scan"},
+      {"type": "notify", "to": "shina", "message": "Entry executed, reset ke h1_scan"}
+    ],
+    "next_phase": "h1_scan",
+    "watchlist_adds": [],
+    "state_updates": {
+      "entry": 0.0,
+      "sl": 0.0,
+      "tp": 0.0,
+      "rr": 0.0
+    },
+    "chat_msg": "Entry/Skip — level dan alasan singkat"
+  },
+
+  "rules": {
+    "candle_limit_m5": 20,
+    "min_rr": 2.0,
+    "max_entry_drift_pct": 0.5,
+    "order_type": "limit",
+    "sl_source": "mss_candle_extreme",
+    "tp_source": "liquidity_pool_since_bos",
+    "allowed_actions": ["force_phase", "notify"],
+    "allowed_force_phases": ["h1_scan"]
+  },
+
+  "extra_instructions": "Gunakan angka PERSIS dari tabel candle M5 dan state_ctx — jangan bulatkan ke 0.20 atau 0.21.\nSetelah entry dieksekusi → actions: force_phase h1_scan.\nKalau RR tidak cukup → notify shina dengan alasan."
+}

@@ -1,0 +1,40 @@
+{
+  "_version": 1,
+  "_ai": "katyusha",
+  "_role": "Supervisor trading ICT — authority penuh",
+
+  "prompt_template": "Kamu adalah Katyusha, supervisor trading ICT.\n\n{state_ctx}\n\nWatchlist aktif:\n{watchlist_summary}\n\n{extra_instructions}\n\nCHECKLIST REVIEW:\n1. cycles_in_phase > MAX → force phase yang tepat\n2. reset_count >= 3 → notify owner\n3. Watchlist level > 1% dari harga sekarang → hapus\n4. Win rate < 30% setelah 10+ trade → naikkan min_confidence\n\n{notify_ctx}\n\nBALAS HANYA JSON:",
+
+  "output_schema": {
+    "analysis": "summary kondisi bot",
+    "decision": "override|monitor",
+    "actions": [
+      {"type": "force_phase", "phase": "idm_hunt"},
+      {"type": "notify", "to": "senanan", "message": "Reset IDM, cari candle A baru"}
+    ],
+    "rules_changes": [
+      {"section": "entry", "key": "min_confidence", "new": 0.65, "reason": "Win rate rendah"}
+    ],
+    "logic_changes": [],
+    "prompts_changes": [
+      {"ai": "hiura", "key": "extra_instructions", "new": "...", "reason": "..."}
+    ],
+    "watchlist_adds": [],
+    "watchlist_clear": false,
+    "chat_msg": "pesan ke owner max 3 kalimat"
+  },
+
+  "rules": {
+    "review_interval_hours": 1,
+    "max_cycles": {
+      "fvg_wait": 10,
+      "idm_hunt": 15,
+      "bos_guard": 10,
+      "entry_sniper": 5
+    },
+    "allowed_actions": ["force_phase", "add_watchlist", "notify", "rules_changes", "logic_changes", "prompts_changes", "watchlist_clear"],
+    "allowed_force_phases": ["h1_scan", "fvg_wait", "idm_hunt", "bos_guard", "entry_sniper"]
+  },
+
+  "extra_instructions": "THRESHOLD OVERRIDE:\n- fvg_wait > 10 siklus → force idm_hunt\n- bos_guard > 10 siklus → force idm_hunt\n- entry_sniper > 5 siklus → force h1_scan\n- idm_hunt > 15 siklus → force h1_scan\n- reset_count >= 3 → notify owner\n\nAUTHORITY PENUH: edit rules.json, logic_rules.json, prompts, force phase, clear watchlist."
+}
