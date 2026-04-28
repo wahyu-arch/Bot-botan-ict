@@ -23,8 +23,11 @@ def load(ai_name: str, reload: bool = False) -> dict:
 
     path = os.path.join(AI_CONFIG_DIR, f"{ai_name}.json")
     if not os.path.exists(path):
-        logger.warning(f"[AI_CONFIG] File tidak ada: {path}")
-        return {}
+        # Auto-create dari bundled defaults di dalam package
+        _create_default(ai_name)
+        if not os.path.exists(path):
+            logger.warning(f"[AI_CONFIG] File tidak ada dan gagal dibuat: {path}")
+            return {}
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
@@ -34,6 +37,45 @@ def load(ai_name: str, reload: bool = False) -> dict:
     except Exception as e:
         logger.error(f"[AI_CONFIG] Gagal load {path}: {e}")
         return {}
+
+
+
+def _create_default(ai_name: str):
+    """
+    Buat file config default kalau belum ada di volume.
+    Ini penting saat pertama deploy ke Railway dengan volume baru.
+    """
+    os.makedirs(AI_CONFIG_DIR, exist_ok=True)
+    path = os.path.join(AI_CONFIG_DIR, f"{ai_name}.json")
+
+    # Coba copy dari data_defaults/ai/ (bundled di repo)
+    for src_dir in ["data_defaults/ai", "data/ai_defaults"]:
+        src = os.path.join(src_dir, f"{ai_name}.json")
+        if os.path.exists(src):
+            import shutil
+            shutil.copy(src, path)
+            logger.info(f"[AI_CONFIG] Created {ai_name}.json from {src}")
+            return
+
+    # Buat minimal default kalau tidak ada source
+    defaults = {
+        "hiura":   {"prompt_template": "Kamu Hiura, analis H1 ICT.\n\n{state_ctx}\n\n{candle_table}\n\n{extra_instructions}\n\nBALAS HANYA JSON:", "rules": {"candle_limit_h1": 80}},
+        "senanan": {"prompt_template": "Kamu Senanan, IDM hunter M5.\n\n{state_ctx}\n\n{candle_table}\n\n{extra_instructions}\n\nBALAS HANYA JSON:", "rules": {"candle_limit_m5": 60}},
+        "shina":   {"prompt_template": "Kamu Shina, penjaga MSS M5.\n\n{state_ctx}\n\n{candle_table}\n\n{extra_instructions}\n\nBALAS HANYA JSON:", "rules": {"candle_limit_m5": 60}},
+        "yusuf":   {"prompt_template": "Kamu Yusuf, entry sniper.\n\nHarga: {price}\n\n{state_ctx}\n\n{candle_table}\n\n{extra_instructions}\n\nBALAS HANYA JSON:", "rules": {"candle_limit_m5": 20}},
+        "katyusha":{"prompt_template": "Kamu Katyusha, supervisor.\n\n{state_ctx}\n\n{extra_instructions}\n\nBALAS HANYA JSON:", "rules": {}},
+    }
+    cfg = defaults.get(ai_name, {})
+    cfg["_version"] = 1
+    cfg["_ai"] = ai_name
+    cfg.setdefault("extra_instructions", "")
+    cfg.setdefault("output_schema", {})
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        logger.info(f"[AI_CONFIG] Created minimal default: {ai_name}.json")
+    except Exception as e:
+        logger.error(f"[AI_CONFIG] Gagal buat default {ai_name}: {e}")
 
 
 def build_prompt(ai_name: str, variables: dict) -> str:
