@@ -7,7 +7,7 @@ import os
 import json
 import glob
 from datetime import datetime, timezone
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -502,8 +502,7 @@ def get_chat():
 @app.route("/api/chat", methods=["POST"])
 def post_chat():
     """User kirim pesan ke Katyusha."""
-    from flask import request as freq
-    data = freq.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or {}
     msg = data.get("message", "").strip()
     if not msg:
         return jsonify({"error": "message kosong"}), 400
@@ -522,8 +521,7 @@ def get_pending():
 @app.route("/api/chat/answer", methods=["POST"])
 def post_answer():
     """Bot push jawaban Katyusha."""
-    from flask import request as freq
-    data = freq.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or {}
     answer = data.get("answer", "").strip()
     # Mark semua user messages sebagai answered
     for m in _user_chat:

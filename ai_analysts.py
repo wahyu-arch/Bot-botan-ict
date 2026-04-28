@@ -187,7 +187,7 @@ def _is_thinking_model(model: str) -> bool:
 
 def _call_with_retry(client, model: str, prompt: str,
                      max_tokens: int = 800, temp: float = 0.2,
-                     max_retries: int = 2) -> dict | None:
+                     max_retries: int = 1) -> dict | None:
     """
     Panggil AI dan retry sampai dapat JSON valid.
     Untuk Qwen QwQ thinking model:
@@ -202,6 +202,17 @@ def _call_with_retry(client, model: str, prompt: str,
         # tapi API butuh space — minimal 1024 extra)
         max_tokens = max(max_tokens, 1024)
 
+    # Pastikan prompt selalu diakhiri dengan instruksi JSON yang tegas
+    json_instruction = (
+        "\n\n/no_think\n⚠️ OUTPUT HARUS JSON MURNI. "
+        "Tidak ada teks, tidak ada ```json, tidak ada penjelasan. "
+        "Langsung mulai dengan { dan akhiri dengan }."
+        if _is_thinking_model(model) else
+        "\n\n⚠️ Balas HANYA dengan JSON murni. Mulai langsung dengan { tanpa teks apapun."
+    )
+    if json_instruction.strip() not in prompt:
+        prompt = prompt + json_instruction
+
     for attempt in range(max_retries + 1):
         try:
             raw = _call(client, model, prompt, max_tokens=max_tokens, temp=temp)
@@ -214,12 +225,13 @@ def _call_with_retry(client, model: str, prompt: str,
                 parsed["_raw"] = raw
                 return parsed
             if attempt < max_retries:
-                logger.warning(f"[RETRY {attempt+1}/{max_retries}] JSON tidak valid, coba lagi...")
-                # Untuk thinking model, instruksi perlu lebih eksplisit
-                if _is_thinking_model(model):
-                    prompt = prompt + "\n\n⚠️ Setelah proses thinking, output HANYA JSON murni. Tidak ada teks, tidak ada markdown."
-                else:
-                    prompt = prompt + "\n\n⚠️ PENTING: Balas HANYA dengan JSON murni, tidak ada teks lain."
+                logger.warning(f"[RETRY {attempt+1}/{max_retries}] JSON tidak valid: {raw[:80]}")
+                # Retry dengan instruksi lebih keras
+                prompt = (
+                    "Output HANYA JSON ini (isi nilai yang sesuai):\n"
+                    + raw[:200]  # tunjukkan sebagian response sebelumnya sebagai contoh
+                    + "\n\nBALAS DENGAN JSON LENGKAP DAN VALID:"
+                )
         except Exception as e:
             logger.warning(f"[RETRY {attempt+1}] Error: {e}")
     logger.error("[RETRY] Semua percobaan gagal — return None")
