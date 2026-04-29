@@ -904,9 +904,12 @@ class BotCore:
             prompt_ctx=self.prompts.build_context('senanan')
         )
         self._senanan_data = result
-        self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
+        _sen_msg = result.get("chat_msg","") or (
+            f"IDM confirmed @ {result.get('watch_level',0):.5f}" if result.get("idm_found")
+            else f"IDM hunting | {result.get('decision','wait')}"
+        )
+        self._push("ai2", "Senanan", _sen_msg, 2)
         self.state_mgr.update_from_senanan(result)
-        # Execute actions dari Senanan
         self._execute_actions("senanan", result.get("actions", []), raw_data)
         self._parse_update_self("senanan", result)
 
@@ -990,7 +993,11 @@ class BotCore:
             return
 
         self._senanan_data = result
-        self._push("ai2", "Senanan", result.get("chat_msg", ""), 2)
+        _sen_msg2 = result.get("chat_msg","") or (
+            f"IDM confirmed @ {result.get('watch_level',0):.5f}" if result.get("idm_found")
+            else f"IDM hunting | {result.get('decision','wait')}"
+        )
+        self._push("ai2", "Senanan", _sen_msg2, 2)
         self.state_mgr.update_from_senanan(result)
         self._execute_actions("senanan", result.get("actions", []), raw)
         self._parse_update_self("senanan", result)

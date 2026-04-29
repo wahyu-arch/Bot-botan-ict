@@ -213,7 +213,7 @@ def get_main_session():
         "total_msgs": total,
         "has_more":   total > 20,
         "conclusion": _main_session_conclusion,
-        "status":     "active" if total > 0 else "idle",
+        "status":     "active",  # selalu active — idle hanya bikin HTML skip render
     })
 
 
