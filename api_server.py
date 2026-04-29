@@ -217,6 +217,11 @@ def get_main_session():
     })
 
 
+@app.route("/api/status")
+def get_status():
+    """Alias /api/status → /api/bot_status untuk backward compat."""
+    return jsonify(list(_bot_status.values()))
+
 @app.route("/api/bot_status")
 def get_bot_status():
     """Status realtime tiap symbol: fase, harga, jumlah watchlist."""

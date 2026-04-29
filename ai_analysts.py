@@ -48,74 +48,42 @@ def _load_json_files() -> dict:
 
 def _build_json_ctx(ctx: dict) -> str:
     """
-    Bangun context ringkas untuk AI — hanya data yang benar-benar dibutuhkan.
-    Tidak dump full JSON supaya tidak 413 Payload Too Large di Groq.
+    Context minimal untuk AI — hanya state trading aktif.
+    Rules/logic/prompts sudah ada di data/ai/<name>.json, tidak perlu dikirim ulang.
+    Target: < 300 token total untuk context ini.
     """
     if not ctx:
         return ""
-    import json as _json
+    import json as _j
     parts = []
 
-    # 1. Trading state — paling penting, selalu ada
+    # State trading saat ini
     if ctx.get("state"):
         parts.append(ctx["state"])
 
-    # 2. Reset count kalau relevan
+    # Warning kalau stuck
     rc  = ctx.get("reset_count", 0)
     cyc = ctx.get("cycles_in_phase", 0)
     if rc > 0 or cyc > 3:
-        parts.append(f"⚠️ reset_count={rc} | cycles_in_phase={cyc}")
+        parts.append(f"⚠️ reset={rc} cycles={cyc}")
 
-    # 3. State dari AI lain — ringkas, bukan full JSON
-    def _summarize_ai(data_str: str, ai_label: str) -> str:
-        if not data_str or data_str == "{}":
-            return ""
+    # State dari AI lain — field penting saja, 1 baris per AI
+    key_fields = ["bias","bos_level","bos_type","sh_since_bos","sl_before_bos",
+                  "watch_level","idm_watch_level","freeze_range","mss_candle",
+                  "decision","next_phase"]
+    for data_key, label in [("hiura_data","H"),("senanan_data","S"),("shina_data","Sh")]:
+        d_str = ctx.get(data_key, "{}")
+        if not d_str or d_str == "{}":
+            continue
         try:
-            d = _json.loads(data_str)
-            # Ambil field penting saja
-            keys = ["bias","bos_level","bos_type","sh_since_bos","sl_before_bos",
-                    "fvg_zone","idm_watch_level","idm_candle_a","freeze_range",
-                    "mss_candle","decision","next_phase","watch_level"]
-            summary = {k: d[k] for k in keys if k in d and d[k]}
-            return f"{ai_label}: {_json.dumps(summary, separators=(',',':'))}" if summary else ""
-        except Exception:
-            return ""
-
-    ai_summaries = []
-    for key, label in [("hiura_data","Hiura"),("senanan_data","Senanan"),("shina_data","Shina")]:
-        s = _summarize_ai(ctx.get(key,"{}"), label)
-        if s:
-            ai_summaries.append(s)
-    if ai_summaries:
-        parts.append("=== STATE AI ===\n" + "\n".join(ai_summaries))
-
-    # 4. Rules — hanya section kecil yang relevan (entry, tp, sl, risk)
-    if ctx.get("logic_raw"):
-        lr = ctx["logic_raw"]
-        relevant = {k: lr[k] for k in ["find_bos_h1","find_fvg_h1","find_idm_m5",
-                                         "find_bos_m5","entry","stop_loss","take_profit"]
-                    if k in lr}
-        if relevant:
-            parts.append(f"=== LOGIC (ringkas) ===\n{_json.dumps(relevant, separators=(',',':'))}")
-    elif ctx.get("logic"):
-        # Potong maksimal 800 karakter
-        parts.append(f"=== LOGIC ===\n{ctx['logic'][:800]}")
-
-    # 5. Rules entry/risk saja
-    if ctx.get("rules"):
-        try:
-            r = _json.loads(ctx["rules"]) if isinstance(ctx["rules"], str) else ctx["rules"]
-            mini = {k: r[k] for k in ["entry","sl","tp","risk","trailing_sl"] if k in r}
-            parts.append(f"=== RULES ===\n{_json.dumps(mini, separators=(',',':'))}")
+            d = _j.loads(d_str)
+            summary = {k: d[k] for k in key_fields if k in d and d[k] not in (None, 0, "", [])}
+            if summary:
+                parts.append(f"{label}:{_j.dumps(summary, separators=(',',':'))}")
         except Exception:
             pass
 
-    # 6. Replay text kalau ada
-    if ctx.get("replay_text"):
-        # Potong replay supaya tidak terlalu panjang
-        parts.append(f"=== REPLAY ===\n{ctx['replay_text'][:600]}")
-
-    return "\n\n".join(p for p in parts if p) if parts else ""
+    return "\n".join(p for p in parts if p) if parts else ""
 
 
 # ── Helpers ─────────────────────────────────────────────
@@ -256,11 +224,15 @@ def _build_notify_ctx(ctx: dict) -> str:
 
 
 def _candle_table(candles: list, limit: int = 40) -> str:
-    """Format candle OHLC jadi teks ringkas."""
-    rows = []
+    """
+    Format candle OHLC ultra-ringkas: idx|O|H|L|C
+    Contoh baris: 173|0.20543|0.20671|0.20412|0.20634
+    AI baca kiri ke kanan — tidak perlu replay engine.
+    ~60% lebih hemat token vs format sebelumnya.
+    """
+    rows = ["idx|O|H|L|C"]
     for c in candles[-limit:]:
-        d = "↑" if c.get("bull") else "↓"
-        rows.append(f"[{c['i']:3}] {c.get('ts','')[-5:]} {d} H:{c['h']} L:{c['l']} C:{c['c']}")
+        rows.append(f"{c['i']}|{c['o']}|{c['h']}|{c['l']}|{c['c']}")
     return "\n".join(rows)
 
 
@@ -300,7 +272,7 @@ def hiura_h1_analysis(client: Groq, model: str, raw_data: dict,
     fvg_min  = fvg_cfg.get("min_gap_pct", 0.05)
 
     # Prompt dari data/ai/hiura.json — tidak hardcode di Python
-    candle_limit = _ai_cfg.get_candle_limit("hiura", "h1")
+    candle_limit = min(_ai_cfg.get_candle_limit("hiura", "h1"), 50)
     h1_table = _candle_table(raw_data["h1"], limit=candle_limit)
     notify_ctx = _build_notify_ctx(ctx)
     prompt = _ai_cfg.build_prompt("hiura", {
@@ -364,7 +336,7 @@ def senanan_idm_hunt(client: Groq, model: str, raw_data: dict,
         replay_m5_text = f"(Replay M5 tidak tersedia: {_e})"
 
     # Prompt dari data/ai/senanan.json
-    candle_limit = _ai_cfg.get_candle_limit("senanan", "m5")
+    candle_limit = min(_ai_cfg.get_candle_limit("senanan", "m5"), 40)
     m5_table = _candle_table(raw_data["m5"], limit=candle_limit)
     notify_ctx = _build_notify_ctx(ctx)
     prompt = _ai_cfg.build_prompt("senanan", {
@@ -411,7 +383,7 @@ def shina_bos_mss(client: Groq, model: str, raw_data: dict,
     idm_type = idm_info.get("idm_type", "")
 
     # Prompt dari data/ai/shina.json
-    candle_limit = _ai_cfg.get_candle_limit("shina", "m5")
+    candle_limit = min(_ai_cfg.get_candle_limit("shina", "m5"), 40)
     m5_table = _candle_table(raw_data["m5"], limit=candle_limit)
     notify_ctx = _build_notify_ctx(ctx)
     prompt = _ai_cfg.build_prompt("shina", {
@@ -486,7 +458,7 @@ def yusuf_entry(client: Groq, model: str, raw_data: dict,
     freeze_low  = shina_data.get("freeze_low",  0)
 
     # Prompt dari data/ai/yusuf.json
-    candle_limit = _ai_cfg.get_candle_limit("yusuf", "m5")
+    candle_limit = min(_ai_cfg.get_candle_limit("yusuf", "m5"), 15)
     m5_recent = _candle_table(raw_data.get("m5", []), limit=candle_limit)
     notify_ctx = _build_notify_ctx(ctx)
     prompt = _ai_cfg.build_prompt("yusuf", {
